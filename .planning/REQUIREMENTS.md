@@ -17,8 +17,8 @@ Requirements for open-source publication. Each maps to roadmap phases.
 
 ### Code Hardening
 
-- [ ] **CODE-01**: `pyproject.toml` created with project metadata, dependencies, and tool configs (ruff, mypy)
-- [ ] **CODE-02**: Dependency versions pinned in requirements.txt (sentence-transformers, anthropic, etc.)
+- [x] **CODE-01**: `pyproject.toml` created with project metadata, dependencies, and tool configs (ruff, mypy)
+- [x] **CODE-02**: Dependency versions pinned in requirements.txt (sentence-transformers, anthropic, etc.)
 - [ ] **CODE-03**: `save_raw_log.py` fails with explicit stderr message when `MEMO_VAULT_PATH` not set (instead of silent failure)
 - [ ] **CODE-04**: ruff configuration added — lint + format rules for consistent code style
 - [ ] **CODE-05**: mypy configuration added — type checking for critical modules
@@ -83,8 +83,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SEC-03 | Phase 1 | Complete |
 | SEC-04 | Phase 1 | Complete |
 | SEC-05 | Phase 1 | Complete |
-| CODE-01 | Phase 2 | Pending |
-| CODE-02 | Phase 2 | Pending |
+| CODE-01 | Phase 2 | Complete |
+| CODE-02 | Phase 2 | Complete |
 | CODE-03 | Phase 2 | Pending |
 | CODE-04 | Phase 2 | Pending |
 | CODE-05 | Phase 2 | Pending |
