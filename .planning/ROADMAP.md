@@ -67,8 +67,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01-PLAN.md — Rewrite README.md for open-source audience (value prop, install, usage, cost)
-- [ ] 03-02-PLAN.md — Create examples/hooks.json, CONTRIBUTING.md, CHANGELOG.md, bump version to 1.0.0
+- [x] 03-01-PLAN.md — Rewrite README.md for open-source audience (value prop, install, usage, cost)
+- [x] 03-02-PLAN.md — Create examples/hooks.json, CONTRIBUTING.md, CHANGELOG.md, bump version to 1.0.0
 
 ### Phase 4: CI & Release
 **Goal**: Public GitHub repo is live, CI passes, and the project is discoverable and contribution-ready
