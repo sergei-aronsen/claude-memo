@@ -30,7 +30,7 @@ Knowledge survives between sessions. What you learned today is available tomorro
 ### Active
 
 - [ ] Publish to GitHub as `claude-memo` (public repo)
-- [ ] README доведён до open-source уровня (installation, contributing, examples)
+- [x] README доведён до open-source уровня (installation, contributing, examples) — Validated in Phase 3: Documentation
 - [x] Проверка на отсутствие чувствительных данных в коде — Validated in Phase 1: Security & Cleanliness
 - [x] Code hardening: pyproject.toml, pinned deps, ruff/mypy, defensive error handling — Validated in Phase 2: Code Hardening
 
@@ -83,4 +83,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-13 after initialization*
+*Last updated: 2026-04-13 after Phase 3 completion*
