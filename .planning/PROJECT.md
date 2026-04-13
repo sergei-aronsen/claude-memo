@@ -31,7 +31,8 @@ Knowledge survives between sessions. What you learned today is available tomorro
 
 - [ ] Publish to GitHub as `claude-memo` (public repo)
 - [ ] README доведён до open-source уровня (installation, contributing, examples)
-- [ ] Проверка на отсутствие чувствительных данных в коде
+- [x] Проверка на отсутствие чувствительных данных в коде — Validated in Phase 1: Security & Cleanliness
+- [x] Code hardening: pyproject.toml, pinned deps, ruff/mypy, defensive error handling — Validated in Phase 2: Code Hardening
 
 ### Out of Scope
 
