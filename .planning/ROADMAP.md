@@ -47,7 +47,12 @@ Plans:
   3. Running `save_raw_log.py` without `MEMO_VAULT_PATH` set prints an explicit error to stderr and exits non-zero instead of failing silently
   4. `ruff check .` passes with zero errors on the codebase
   5. `mypy` passes on critical modules with zero errors
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Create pyproject.toml with metadata and tool configs, pin requirements.txt
+- [ ] 02-02-PLAN.md — Add explicit vault path validation to entry-point scripts
+- [ ] 02-03-PLAN.md — Install ruff/mypy, fix all lint and type errors
 
 ### Phase 3: Documentation
 **Goal**: A new user can understand what claude-memo does, install it, and start using it from the README alone
@@ -80,6 +85,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Security & Cleanliness | 4/4 | Complete   | 2026-04-13 |
-| 2. Code Hardening | 0/? | Not started | - |
+| 2. Code Hardening | 0/3 | Not started | - |
 | 3. Documentation | 0/? | Not started | - |
 | 4. CI & Release | 0/? | Not started | - |
