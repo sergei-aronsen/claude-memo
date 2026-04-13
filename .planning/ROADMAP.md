@@ -64,7 +64,11 @@ Plans:
   3. CONTRIBUTING.md exists with dev setup, code style instructions, and PR process
   4. CHANGELOG.md exists with a v1.0.0 entry describing initial features
   5. `examples/` directory contains a ready-to-use hooks config JSON that new users can copy directly into their Claude Code settings
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 03-01-PLAN.md — Rewrite README.md for open-source audience (value prop, install, usage, cost)
+- [ ] 03-02-PLAN.md — Create examples/hooks.json, CONTRIBUTING.md, CHANGELOG.md, bump version to 1.0.0
 
 ### Phase 4: CI & Release
 **Goal**: Public GitHub repo is live, CI passes, and the project is discoverable and contribution-ready
@@ -86,5 +90,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Security & Cleanliness | 4/4 | Complete   | 2026-04-13 |
 | 2. Code Hardening | 1/3 | In Progress|  |
-| 3. Documentation | 0/? | Not started | - |
+| 3. Documentation | 0/2 | Not started | - |
 | 4. CI & Release | 0/? | Not started | - |
