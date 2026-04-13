@@ -51,7 +51,7 @@ Plans:
 
 Plans:
 - [x] 02-01-PLAN.md — Create pyproject.toml with metadata and tool configs, pin requirements.txt
-- [ ] 02-02-PLAN.md — Add explicit vault path validation to entry-point scripts
+- [x] 02-02-PLAN.md — Add explicit vault path validation to entry-point scripts
 - [ ] 02-03-PLAN.md — Install ruff/mypy, fix all lint and type errors
 
 ### Phase 3: Documentation
