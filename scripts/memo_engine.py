@@ -37,6 +37,7 @@ import sqlite3
 import subprocess
 import sys
 from datetime import datetime
+from typing import Any
 
 import numpy as np
 from memo_utils import call_haiku, parse_frontmatter
@@ -203,8 +204,8 @@ class EmbeddingsStore:
         self.vault_path = vault_path
         self.emb_path = get_embeddings_path(vault_path)
         self.map_path = get_id_map_path(vault_path)
-        self.embeddings = None  # (N, D) numpy array
-        self.id_map = []  # list of note IDs, index-aligned with embeddings
+        self.embeddings: np.ndarray | None = None  # (N, D) numpy array
+        self.id_map: list[int] = []  # list of note IDs, index-aligned with embeddings
         self._load()
 
     def _load(self):
@@ -234,6 +235,7 @@ class EmbeddingsStore:
 
         if note_id in self.id_map:
             idx = self.id_map.index(note_id)
+            assert self.embeddings is not None  # id_map non-empty implies embeddings loaded
             self.embeddings[idx] = embedding
         else:
             if self.embeddings is None:
@@ -476,7 +478,7 @@ def find_duplicates(vault_path: str, threshold: float = 0.7):
     normalized = emb / norms
     sim_matrix = normalized @ normalized.T
 
-    pairs = []
+    pairs: list[dict[str, Any]] = []
     n = len(store.id_map)
     for i in range(n):
         for j in range(i + 1, n):
@@ -532,15 +534,13 @@ def vault_stats(vault_path: str):
     link_counts.sort(key=lambda x: x[1], reverse=True)
 
     # Orphans (no incoming or outgoing links)
-    all_links = set()
+    all_links: set[str] = set()
     for r in rows:
         links = json.loads(r["wikilinks"]) if r["wikilinks"] else []
         all_links.update(links)
 
-    {r["title"] for r in rows}
-
     # Tag frequency
-    tag_freq = {}
+    tag_freq: dict[str, int] = {}
     for r in conn.execute("SELECT tags FROM notes").fetchall():
         tags = json.loads(r["tags"]) if r["tags"] else []
         for tag in tags:
@@ -654,7 +654,7 @@ class ObsidianCLI:
 
     def __init__(self, vault_path: str):
         self.vault_path = vault_path
-        self._available = None  # Lazy check
+        self._available: bool | None = None  # Lazy check
 
     def is_available(self) -> bool:
         """Check if Obsidian CLI is installed and responsive."""
@@ -734,7 +734,7 @@ class ObsidianCLI:
         if not self.is_available():
             return None
 
-        info = {"cli_available": True}
+        info: dict[str, bool | list[str] | int | dict[str, int]] = {"cli_available": True}
 
         orphans = self.get_orphans()
         if orphans is not None:
@@ -761,7 +761,7 @@ def lint_vault(vault_path: str) -> dict:
     partial matches that our regex parser might miss).
     """
     conn = init_db(vault_path)
-    issues = {
+    issues: dict[str, Any] = {
         "broken_links": [],
         "orphan_notes": [],
         "missing_backlinks": [],
@@ -800,14 +800,14 @@ def lint_vault(vault_path: str) -> dict:
 
     # Collect all outgoing wikilinks per note
     outgoing = {}  # filepath -> list of link targets
-    all_link_targets = set()
+    all_link_targets: set[str] = set()
     for row in all_notes:
         links = json.loads(row["wikilinks"]) if row["wikilinks"] else []
         outgoing[row["filepath"]] = links
         all_link_targets.update(links)
 
     # Collect all incoming links per note
-    incoming = {}  # filepath -> set of source filepaths
+    incoming: dict[str, set[str]] = {}  # filepath -> set of source filepaths
     for filepath, links in outgoing.items():
         for link in links:
             # Link could be "decisions/2026-04-11-some-slug" or just "some-slug"

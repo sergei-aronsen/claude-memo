@@ -19,7 +19,7 @@ from datetime import datetime
 
 # Try PyYAML first (preferred), fall back to basic parser
 try:
-    import yaml
+    import yaml  # type: ignore[import-untyped]  # stubs optional: pip install types-PyYAML
 
     HAS_PYYAML = True
 except ImportError:
@@ -63,9 +63,9 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
 
 def _parse_frontmatter_basic(raw_yaml: str) -> dict:
     """Fallback YAML parser for environments without PyYAML."""
-    meta = {}
-    current_key = None
-    current_list = None
+    meta: dict[str, str | list[str]] = {}
+    current_key: str | None = None
+    current_list: list[str] | None = None
 
     for line in raw_yaml.split("\n"):
         stripped = line.strip()
@@ -173,7 +173,7 @@ def _get_provider_config() -> dict:
     }
 
 
-def call_llm(prompt: str, max_tokens: int = 4000, system: str = None) -> str | None:
+def call_llm(prompt: str, max_tokens: int = 4000, system: str | None = None) -> str | None:
     """Call LLM via configurable provider with automatic fallback.
 
     Tries the primary model first. If it fails (timeout, error, empty
@@ -278,7 +278,7 @@ def _call_openai_compat(prompt, max_tokens, system, config) -> str | None:
 
 
 # Backward-compatible alias
-def call_haiku(prompt: str, max_tokens: int = 4000, system: str = None) -> str | None:
+def call_haiku(prompt: str, max_tokens: int = 4000, system: str | None = None) -> str | None:
     """Backward-compatible alias for call_llm."""
     return call_llm(prompt, max_tokens, system)
 
