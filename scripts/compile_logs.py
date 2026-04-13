@@ -18,13 +18,11 @@ Cost: ~$0.005-0.02 per day (Haiku batch on all daily logs).
 import argparse
 import os
 import sys
-from datetime import datetime
 
 # Add scripts dir to path for memo_utils import
 sys.path.insert(0, os.path.dirname(__file__))
 
-from memo_utils import call_haiku, parse_json_response, save_memo, memo_log, index_memo_file
-
+from memo_utils import call_haiku, index_memo_file, memo_log, parse_json_response, save_memo
 
 COMPILED_MARKER = "<!-- compiled -->"
 AUTO_PROCESSED_MARKER = "<!-- auto-processed"
@@ -74,7 +72,8 @@ def compile_log_to_memos(log_path: str, vault_path: str) -> list[dict]:
     if len(content) > 30000:
         content = content[:30000] + "\n\n... [truncated]"
 
-    prompt = f"""Analyze this daily work log from a Claude Code session. Extract ALL knowledge worth preserving as structured notes.
+    prompt = f"""Analyze this daily work log from a Claude Code session.
+Extract ALL knowledge worth preserving as structured notes.
 
 For each piece of knowledge, create a separate memo. Look for:
 1. Architecture decisions with tradeoffs

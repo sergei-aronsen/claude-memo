@@ -28,7 +28,7 @@ def read_last_messages(transcript_path: str, max_messages: int = 30) -> list[dic
         with open(transcript_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
-        for line in lines[-(max_messages * 3):]:  # Read extra lines, filter
+        for line in lines[-(max_messages * 3) :]:  # Read extra lines, filter
             line = line.strip()
             if not line:
                 continue
@@ -40,8 +40,7 @@ def read_last_messages(transcript_path: str, max_messages: int = 30) -> list[dic
                 content = entry.get("content", "")
                 if isinstance(content, list):
                     content = " ".join(
-                        b.get("text", "") for b in content
-                        if isinstance(b, dict) and b.get("type") == "text"
+                        b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
                     )
                 if role in ("user", "assistant") and content and content.strip():
                     messages.append({"role": role, "content": content})

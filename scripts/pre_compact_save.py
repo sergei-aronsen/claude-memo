@@ -72,8 +72,7 @@ def main():
                     content = entry.get("content", "")
                     if isinstance(content, list):
                         content = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
+                            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
                         )
                     if role in ("user", "assistant") and content and content.strip():
                         messages.append({"role": role, "content": content[:2000]})

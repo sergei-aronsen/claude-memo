@@ -15,30 +15,68 @@ import sys
 
 # Patterns that suggest memo-worthy content
 DECISION_SIGNALS = [
-    "let's go with", "decided to use", "выбрали", "решили использовать",
-    "tradeoff", "trade-off", "compromise", "instead of", "вместо",
-    "better approach", "лучший подход", "the reason we",
-    "chose", "picked", "switched to", "migrated to",
-    "pros and cons", "плюсы и минусы",
+    "let's go with",
+    "decided to use",
+    "выбрали",
+    "решили использовать",
+    "tradeoff",
+    "trade-off",
+    "compromise",
+    "instead of",
+    "вместо",
+    "better approach",
+    "лучший подход",
+    "the reason we",
+    "chose",
+    "picked",
+    "switched to",
+    "migrated to",
+    "pros and cons",
+    "плюсы и минусы",
 ]
 
 DEBUG_SIGNALS = [
-    "finally fixed", "the issue was", "root cause", "проблема была в",
-    "turns out", "оказалось", "the bug was", "workaround",
-    "after debugging", "took a while", "tricky", "нашли баг",
-    "solution:", "fix:", "resolved by",
+    "finally fixed",
+    "the issue was",
+    "root cause",
+    "проблема была в",
+    "turns out",
+    "оказалось",
+    "the bug was",
+    "workaround",
+    "after debugging",
+    "took a while",
+    "tricky",
+    "нашли баг",
+    "solution:",
+    "fix:",
+    "resolved by",
 ]
 
 PATTERN_SIGNALS = [
-    "pattern", "reusable", "паттерн", "можно переиспользовать",
-    "boilerplate", "template", "шаблон", "helper",
-    "utility", "abstraction", "wrapper",
+    "pattern",
+    "reusable",
+    "паттерн",
+    "можно переиспользовать",
+    "boilerplate",
+    "template",
+    "шаблон",
+    "helper",
+    "utility",
+    "abstraction",
+    "wrapper",
 ]
 
 TOOL_SIGNALS = [
-    "discovered", "found this tool", "нашёл инструмент",
-    "TIL", "til:", "useful command", "полезная команда",
-    "config trick", "трюк с конфигом",
+    "discovered",
+    "found this tool",
+    "нашёл инструмент",
+    "TIL",
+    "til:",
+    "useful command",
+    "полезная команда",
+    "config trick",
+    "трюк с конфигом",
 ]
 
 ALL_SIGNALS = DECISION_SIGNALS + DEBUG_SIGNALS + PATTERN_SIGNALS + TOOL_SIGNALS
@@ -77,8 +115,7 @@ def main():
                     content = entry.get("content", "")
                     if isinstance(content, list):
                         content = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
+                            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
                         )
                     if role in ("user", "assistant") and content:
                         messages.append(content.lower())

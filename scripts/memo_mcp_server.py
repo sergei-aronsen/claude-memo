@@ -47,7 +47,7 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP  # noqa: E402 — import after sys.path.insert for local module discovery
 
 # ─── Server setup ───
 
@@ -151,7 +151,7 @@ def memo_save(
         alternatives: What else was considered (for decisions).
         consequences: What this means going forward.
     """
-    from memo_utils import save_memo, index_memo_file
+    from memo_utils import index_memo_file, save_memo
 
     vault = get_vault_path()
 
@@ -220,8 +220,7 @@ def memo_lint() -> str:
     summary = issues.pop("_summary", {})
 
     lines = [
-        f"Vault lint: {summary.get('total_issues', 0)} issues "
-        f"in {summary.get('total_notes', 0)} notes",
+        f"Vault lint: {summary.get('total_issues', 0)} issues in {summary.get('total_notes', 0)} notes",
         f"Obsidian CLI: {'yes' if summary.get('obsidian_cli') else 'no (regex fallback)'}\n",
     ]
 
@@ -230,9 +229,7 @@ def memo_lint() -> str:
             lines.append(f"{check}: {len(items)} issue(s)")
             for item in items[:5]:
                 if isinstance(item, dict):
-                    lines.append(
-                        f"  - {item.get('title', item.get('filepath', str(item)))}"
-                    )
+                    lines.append(f"  - {item.get('title', item.get('filepath', str(item)))}")
                 else:
                     lines.append(f"  - {item}")
             if len(items) > 5:
@@ -288,10 +285,7 @@ def memo_trace(concept: str, limit: int = 10) -> str:
         lines.append(f"### {date} — {r['title']} ({note_type}){project}")
         lines.append(f"{snippet}\n")
 
-    lines.append(
-        f"→ {len(results)} notes found. "
-        f"Showing {min(limit, len(results))} in chronological order."
-    )
+    lines.append(f"→ {len(results)} notes found. Showing {min(limit, len(results))} in chronological order.")
 
     return "\n".join(lines)
 
@@ -313,10 +307,7 @@ def memo_find_duplicates(threshold: float = 0.85) -> str:
 
     lines = [f"Found {len(pairs)} potential duplicate pair(s):\n"]
     for p in pairs[:10]:
-        lines.append(
-            f"- {p['title_a']} ↔ {p['title_b']} "
-            f"(similarity: {p['similarity']:.2f})"
-        )
+        lines.append(f"- {p['title_a']} ↔ {p['title_b']} (similarity: {p['similarity']:.2f})")
 
     return "\n".join(lines)
 

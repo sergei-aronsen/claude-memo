@@ -23,11 +23,8 @@ Cost: ~$0.001-0.005 per session (Haiku). Runs async, doesn't block.
 import argparse
 import json
 import os
-import re
-import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
 
 
 def read_transcript(transcript_path: str) -> list[dict]:
@@ -78,8 +75,7 @@ def read_transcript(transcript_path: str) -> list[dict]:
                             result_content = block.get("content", "")
                             if isinstance(result_content, list):
                                 result_content = " ".join(
-                                    b.get("text", "") for b in result_content
-                                    if isinstance(b, dict)
+                                    b.get("text", "") for b in result_content if isinstance(b, dict)
                                 )
                             if result_content:
                                 text_parts.append(f"[Tool result: {str(result_content)[:200]}]")
@@ -98,7 +94,7 @@ def read_transcript(transcript_path: str) -> list[dict]:
 
     except FileNotFoundError:
         return []
-    except Exception as e:
+    except Exception:
         # Don't crash on any transcript format issue
         if messages:
             return messages  # Return what we got
@@ -131,7 +127,8 @@ def classify_and_extract(conversation: str, vault_path: str) -> list[dict]:
     Send conversation to Claude Haiku for classification and extraction.
     Returns list of memo dicts ready to save.
     """
-    prompt = f"""Analyze this Claude Code session transcript. Extract any knowledge worth saving for long-term engineering memory.
+    prompt = f"""Analyze this Claude Code session transcript.
+Extract any knowledge worth saving for long-term engineering memory.
 
 Look for:
 1. **Decisions** — architecture choices, tech stack picks, tradeoffs discussed
@@ -166,7 +163,7 @@ TRANSCRIPT:
 {conversation}"""
 
     # Use secure API client (no curl, no API key in ps)
-    from memo_utils import call_haiku, parse_json_response, memo_log
+    from memo_utils import call_haiku, memo_log, parse_json_response
 
     text = call_haiku(prompt, max_tokens=4000)
     if not text:
@@ -182,6 +179,7 @@ TRANSCRIPT:
 def _save_memo(memo: dict, vault_path: str, session_id: str) -> str | None:
     """Delegate to shared save_memo in memo_utils."""
     from memo_utils import save_memo
+
     return save_memo(memo, vault_path, session_id=session_id, source="auto-memo")
 
 
@@ -242,7 +240,8 @@ def main():
             except Exception:
                 pass
 
-    memo_log(vault_path, f"Auto-saved {len(saved)} memo(s): {', '.join(os.path.basename(f) for f in saved)}", "auto-memo")
+    saved_names = ", ".join(os.path.basename(f) for f in saved)
+    memo_log(vault_path, f"Auto-saved {len(saved)} memo(s): {saved_names}", "auto-memo")
 
 
 if __name__ == "__main__":

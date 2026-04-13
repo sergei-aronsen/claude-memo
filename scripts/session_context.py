@@ -22,8 +22,7 @@ def get_project_name(cwd: str) -> str | None:
     # Try git remote
     try:
         result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=3, cwd=cwd
+            ["git", "remote", "get-url", "origin"], capture_output=True, text=True, timeout=3, cwd=cwd
         )
         if result.returncode == 0:
             url = result.stdout.strip()
@@ -54,7 +53,7 @@ def load_project_context(vault_path: str, project_name: str) -> str | None:
         project_row = conn.execute(
             "SELECT filepath, title, body FROM notes WHERE type='project' AND "
             "(LOWER(project) = ? OR LOWER(title) LIKE ?)",
-            (project_name, f"%{project_name}%")
+            (project_name, f"%{project_name}%"),
         ).fetchone()
 
         if project_row:
@@ -69,7 +68,7 @@ def load_project_context(vault_path: str, project_name: str) -> str | None:
             "SELECT title, body, created FROM notes "
             "WHERE type='decision' AND (LOWER(project) = ? OR LOWER(project) LIKE ?) "
             "ORDER BY created DESC LIMIT 5",
-            (project_name, f"%{project_name}%")
+            (project_name, f"%{project_name}%"),
         ).fetchall()
 
         if decisions:
@@ -85,7 +84,7 @@ def load_project_context(vault_path: str, project_name: str) -> str | None:
             "SELECT title, created FROM notes "
             "WHERE type='debug' AND (LOWER(project) = ? OR LOWER(project) LIKE ?) "
             "ORDER BY created DESC LIMIT 3",
-            (project_name, f"%{project_name}%")
+            (project_name, f"%{project_name}%"),
         ).fetchall()
 
         if debugs:

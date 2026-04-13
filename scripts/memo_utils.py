@@ -13,21 +13,21 @@ Single source of truth for:
 import json
 import os
 import re
-import urllib.request
 import urllib.error
+import urllib.request
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
 # Try PyYAML first (preferred), fall back to basic parser
 try:
     import yaml
+
     HAS_PYYAML = True
 except ImportError:
     HAS_PYYAML = False
 
 
 # ─── YAML Frontmatter ───
+
 
 def parse_frontmatter(content: str) -> tuple[dict, str]:
     """Parse YAML frontmatter from markdown content.
@@ -86,7 +86,7 @@ def _parse_frontmatter_basic(raw_yaml: str) -> dict:
             # Use first colon only — handles "title: PostgreSQL: when to use jsonb"
             idx = stripped.index(":")
             key = stripped[:idx].strip()
-            value = stripped[idx + 1:].strip().strip("'\"")
+            value = stripped[idx + 1 :].strip().strip("'\"")
             current_key = key
 
             if value:
@@ -159,11 +159,7 @@ def _get_provider_config() -> dict:
 
     defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["openrouter"])
 
-    api_key = (
-        os.environ.get("MEMO_API_KEY")
-        or os.environ.get(defaults["key_env"])
-        or ""
-    )
+    api_key = os.environ.get("MEMO_API_KEY") or os.environ.get(defaults["key_env"]) or ""
     model = os.environ.get("MEMO_MODEL") or defaults["model"]
     fallback = os.environ.get("MEMO_FALLBACK_MODEL") or defaults["fallback_model"]
     url = os.environ.get("MEMO_API_URL") or defaults["url"]
@@ -292,8 +288,8 @@ def parse_json_response(text: str) -> list | dict | None:
     if not text:
         return None
     text = text.strip()
-    text = re.sub(r'^```json\s*', '', text)
-    text = re.sub(r'\s*```$', '', text)
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -301,6 +297,7 @@ def parse_json_response(text: str) -> list | dict | None:
 
 
 # ─── Save Memo (single source of truth) ───
+
 
 def save_memo(
     memo: dict,
@@ -324,8 +321,8 @@ def save_memo(
     title = memo.get("title", "Untitled")
 
     # Generate slug
-    slug = re.sub(r'[^\w\s-]', '', title.lower())
-    slug = re.sub(r'[\s]+', '-', slug)
+    slug = re.sub(r"[^\w\s-]", "", title.lower())
+    slug = re.sub(r"[\s]+", "-", slug)
     slug = slug[:80]
 
     # Type → folder mapping
@@ -441,6 +438,7 @@ def append_to_index(vault_path: str, filepath: str, title: str, source: str):
 
 # ─── Logging ───
 
+
 def memo_log(vault_path: str, message: str, component: str = "memo"):
     """Append timestamped message to .memo/auto_memo.log."""
     log_path = os.path.join(vault_path, ".memo", "auto_memo.log")
@@ -459,9 +457,11 @@ def index_memo_file(filepath: str, vault_path: str):
     if os.path.exists(engine):
         try:
             import subprocess
+
             subprocess.run(
                 ["python3", engine, "index-file", filepath, "--vault", vault_path],
-                capture_output=True, timeout=30,
+                capture_output=True,
+                timeout=30,
             )
         except Exception:
             pass

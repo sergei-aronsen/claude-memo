@@ -29,35 +29,33 @@ Usage:
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import subprocess
 import sys
-import hashlib
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
 import numpy as np
+from memo_utils import call_haiku, parse_frontmatter
 
 # ─── Model config ───
 
 MODEL_NAME = "intfloat/multilingual-e5-large"
 # Cache path so model doesn't re-download. Set via env var or default.
-MODEL_CACHE = os.environ.get(
-    "MEMO_MODEL_CACHE",
-    os.path.join(os.path.expanduser("~"), ".cache", "memo-models")
-)
+MODEL_CACHE = os.environ.get("MEMO_MODEL_CACHE", os.path.join(os.path.expanduser("~"), ".cache", "memo-models"))
 
 _model = None
+
 
 def get_model():
     """Lazy-load the embedding model. Downloads on first use (~1.1GB)."""
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
+
         _model = SentenceTransformer(MODEL_NAME, cache_folder=MODEL_CACHE)
     return _model
 
@@ -97,6 +95,7 @@ def get_lock_path(vault_path: str) -> str:
 
 class VaultLock:
     """File-based lock to prevent concurrent writes to vault index."""
+
     def __init__(self, vault_path: str):
         ensure_memo_dir(vault_path)
         self.lock_path = get_lock_path(vault_path)
@@ -119,9 +118,6 @@ class VaultLock:
 
 # ─── Frontmatter parser ───
 
-# Use shared parser (PyYAML when available, safe fallback)
-from memo_utils import parse_frontmatter, call_haiku, parse_json_response
-
 
 def extract_title(body: str) -> str:
     """Extract the first H1 heading from markdown body."""
@@ -143,6 +139,7 @@ def compute_file_hash(filepath: str) -> str:
 
 
 # ─── Database ───
+
 
 def init_db(vault_path: str) -> sqlite3.Connection:
     """Initialize SQLite database with FTS5 virtual table."""
@@ -198,6 +195,7 @@ def init_db(vault_path: str) -> sqlite3.Connection:
 
 # ─── Embeddings store ───
 
+
 class EmbeddingsStore:
     """Simple numpy-based embeddings storage with ID mapping."""
 
@@ -206,7 +204,7 @@ class EmbeddingsStore:
         self.emb_path = get_embeddings_path(vault_path)
         self.map_path = get_id_map_path(vault_path)
         self.embeddings = None  # (N, D) numpy array
-        self.id_map = []         # list of note IDs, index-aligned with embeddings
+        self.id_map = []  # list of note IDs, index-aligned with embeddings
         self._load()
 
     def _load(self):
@@ -291,6 +289,7 @@ class EmbeddingsStore:
 
 # ─── Core operations ───
 
+
 def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: EmbeddingsStore, **kwargs):
     """Index a single markdown file into SQLite + embeddings.
 
@@ -306,9 +305,7 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
     file_hash = compute_file_hash(filepath)
 
     # Check if already indexed and unchanged
-    existing = conn.execute(
-        "SELECT id, content_hash FROM notes WHERE filepath = ?", (rel_path,)
-    ).fetchone()
+    existing = conn.execute("SELECT id, content_hash FROM notes WHERE filepath = ?", (rel_path,)).fetchone()
 
     if existing and existing["content_hash"] == file_hash:
         return existing["id"]  # No changes
@@ -323,33 +320,54 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
     now = datetime.now().isoformat()
 
     if existing:
-        conn.execute("""
+        conn.execute(
+            """
             UPDATE notes SET
                 filename=?, title=?, type=?, project=?, created=?, updated=?,
                 tags=?, aliases=?, wikilinks=?, content_hash=?, indexed_at=?, body=?
             WHERE id=?
-        """, (
-            os.path.basename(filepath), title,
-            meta.get("type"), meta.get("project"),
-            meta.get("created"), meta.get("updated"),
-            tags_json, aliases_json, wikilinks_json,
-            file_hash, now, body,
-            existing["id"]
-        ))
+        """,
+            (
+                os.path.basename(filepath),
+                title,
+                meta.get("type"),
+                meta.get("project"),
+                meta.get("created"),
+                meta.get("updated"),
+                tags_json,
+                aliases_json,
+                wikilinks_json,
+                file_hash,
+                now,
+                body,
+                existing["id"],
+            ),
+        )
         note_id = existing["id"]
     else:
-        cur = conn.execute("""
+        cur = conn.execute(
+            """
             INSERT INTO notes (filepath, filename, title, type, project, created,
                              updated, tags, aliases, wikilinks, content_hash,
                              indexed_at, body)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            rel_path, os.path.basename(filepath), title,
-            meta.get("type"), meta.get("project"),
-            meta.get("created"), meta.get("updated"),
-            tags_json, aliases_json, wikilinks_json,
-            file_hash, now, body
-        ))
+        """,
+            (
+                rel_path,
+                os.path.basename(filepath),
+                title,
+                meta.get("type"),
+                meta.get("project"),
+                meta.get("created"),
+                meta.get("updated"),
+                tags_json,
+                aliases_json,
+                wikilinks_json,
+                file_hash,
+                now,
+                body,
+            ),
+        )
         note_id = cur.lastrowid
 
     conn.commit()
@@ -383,14 +401,17 @@ def search_vault(query: str, vault_path: str, limit: int = 10, threshold: float 
     # 2. Keyword search via FTS5
     try:
         # Escape special FTS5 characters
-        safe_query = re.sub(r'[^\w\s]', ' ', query)
+        safe_query = re.sub(r"[^\w\s]", " ", query)
         terms = safe_query.split()
         fts_query = " OR ".join(terms)
 
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT rowid, rank FROM notes_fts WHERE notes_fts MATCH ?
             ORDER BY rank LIMIT ?
-        """, (fts_query, limit * 2)).fetchall()
+        """,
+            (fts_query, limit * 2),
+        ).fetchall()
 
         for row in rows:
             note_id = row["rowid"]
@@ -416,22 +437,23 @@ def search_vault(query: str, vault_path: str, limit: int = 10, threshold: float 
     output = []
     for note_id, combined, sem, kw in scored:
         row = conn.execute(
-            "SELECT filepath, title, type, project, tags, created FROM notes WHERE id = ?",
-            (note_id,)
+            "SELECT filepath, title, type, project, tags, created FROM notes WHERE id = ?", (note_id,)
         ).fetchone()
         if row:
-            output.append({
-                "id": note_id,
-                "filepath": row["filepath"],
-                "title": row["title"],
-                "type": row["type"],
-                "project": row["project"],
-                "tags": row["tags"],
-                "created": row["created"],
-                "score": round(combined, 3),
-                "semantic": round(sem, 3),
-                "keyword": round(kw, 3),
-            })
+            output.append(
+                {
+                    "id": note_id,
+                    "filepath": row["filepath"],
+                    "title": row["title"],
+                    "type": row["type"],
+                    "project": row["project"],
+                    "tags": row["tags"],
+                    "created": row["created"],
+                    "score": round(combined, 3),
+                    "semantic": round(sem, 3),
+                    "keyword": round(kw, 3),
+                }
+            )
 
     conn.close()
     return output
@@ -464,11 +486,13 @@ def find_duplicates(vault_path: str, threshold: float = 0.7):
                 row_a = conn.execute("SELECT filepath, title FROM notes WHERE id=?", (id_a,)).fetchone()
                 row_b = conn.execute("SELECT filepath, title FROM notes WHERE id=?", (id_b,)).fetchone()
                 if row_a and row_b:
-                    pairs.append({
-                        "note_a": {"id": id_a, "title": row_a["title"], "path": row_a["filepath"]},
-                        "note_b": {"id": id_b, "title": row_b["title"], "path": row_b["filepath"]},
-                        "similarity": round(float(sim_matrix[i, j]), 3)
-                    })
+                    pairs.append(
+                        {
+                            "note_a": {"id": id_a, "title": row_a["title"], "path": row_a["filepath"]},
+                            "note_b": {"id": id_b, "title": row_b["title"], "path": row_b["filepath"]},
+                            "similarity": round(float(sim_matrix[i, j]), 3),
+                        }
+                    )
 
     pairs.sort(key=lambda x: x["similarity"], reverse=True)
     conn.close()
@@ -478,10 +502,13 @@ def find_duplicates(vault_path: str, threshold: float = 0.7):
 def list_notes(vault_path: str, limit: int = 10):
     """List recent notes."""
     conn = init_db(vault_path)
-    rows = conn.execute("""
+    rows = conn.execute(
+        """
         SELECT filepath, title, type, project, tags, created
         FROM notes ORDER BY created DESC LIMIT ?
-    """, (limit,)).fetchall()
+    """,
+        (limit,),
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -491,9 +518,7 @@ def vault_stats(vault_path: str):
     conn = init_db(vault_path)
 
     total = conn.execute("SELECT COUNT(*) as c FROM notes").fetchone()["c"]
-    by_type = conn.execute(
-        "SELECT type, COUNT(*) as c FROM notes GROUP BY type ORDER BY c DESC"
-    ).fetchall()
+    by_type = conn.execute("SELECT type, COUNT(*) as c FROM notes GROUP BY type ORDER BY c DESC").fetchall()
     by_project = conn.execute(
         "SELECT project, COUNT(*) as c FROM notes WHERE project IS NOT NULL GROUP BY project ORDER BY c DESC"
     ).fetchall()
@@ -512,7 +537,7 @@ def vault_stats(vault_path: str):
         links = json.loads(r["wikilinks"]) if r["wikilinks"] else []
         all_links.update(links)
 
-    all_titles = {r["title"] for r in rows}
+    {r["title"] for r in rows}
 
     # Tag frequency
     tag_freq = {}
@@ -614,6 +639,7 @@ def reindex_vault(vault_path: str, full: bool = True):
 
 # ─── Obsidian CLI integration (optional) ───
 
+
 class ObsidianCLI:
     """Optional integration with Obsidian's CLI tool.
 
@@ -635,10 +661,7 @@ class ObsidianCLI:
         if self._available is not None:
             return self._available
         try:
-            result = subprocess.run(
-                ["obsidian", "help"],
-                capture_output=True, text=True, timeout=5
-            )
+            result = subprocess.run(["obsidian", "help"], capture_output=True, text=True, timeout=5)
             self._available = result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             self._available = False
@@ -650,9 +673,7 @@ class ObsidianCLI:
             return None
         try:
             result = subprocess.run(
-                ["obsidian", *args],
-                capture_output=True, text=True, timeout=15,
-                cwd=self.vault_path
+                ["obsidian", *args], capture_output=True, text=True, timeout=15, cwd=self.vault_path
             )
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -762,7 +783,9 @@ def lint_vault(vault_path: str) -> dict:
 
         cli_dead_ends = obs_cli.get_dead_ends()
         if cli_dead_ends is not None:
-            issues["broken_links"] = [{"source": "vault", "broken_link": f, "source_info": "obsidian-cli"} for f in cli_dead_ends]
+            issues["broken_links"] = [
+                {"source": "vault", "broken_link": f, "source_info": "obsidian-cli"} for f in cli_dead_ends
+            ]
 
     # Load all notes
     all_notes = conn.execute("SELECT id, filepath, title, tags, aliases, wikilinks, body FROM notes").fetchall()
@@ -770,7 +793,7 @@ def lint_vault(vault_path: str) -> dict:
     all_titles = {row["title"] for row in all_notes}
 
     # Build maps
-    filepath_to_title = {row["filepath"]: row["title"] for row in all_notes}
+    {row["filepath"]: row["title"] for row in all_notes}
     title_to_filepath = {}
     for row in all_notes:
         title_to_filepath[row["title"]] = row["filepath"]
@@ -800,10 +823,12 @@ def lint_vault(vault_path: str) -> dict:
                 # Check if link matches a title
                 if link not in all_titles:
                     if not obs_available:  # Only use regex parser if CLI unavailable
-                        issues["broken_links"].append({
-                            "source": filepath,
-                            "broken_link": link,
-                        })
+                        issues["broken_links"].append(
+                            {
+                                "source": filepath,
+                                "broken_link": link,
+                            }
+                        )
 
     # 2. Orphan notes: no incoming links at all
     if not obs_available:  # CLI gives more accurate orphan data
@@ -811,10 +836,12 @@ def lint_vault(vault_path: str) -> dict:
             fp = row["filepath"]
             if fp not in incoming and not fp.startswith("projects/"):
                 # Project notes are entry points, don't flag as orphans
-                issues["orphan_notes"].append({
-                    "filepath": fp,
-                    "title": row["title"],
-                })
+                issues["orphan_notes"].append(
+                    {
+                        "filepath": fp,
+                        "title": row["title"],
+                    }
+                )
 
     # 3. Missing backlinks: A links to B, but B doesn't link to A
     for source_fp, links in outgoing.items():
@@ -825,25 +852,26 @@ def lint_vault(vault_path: str) -> dict:
                     # Check if target links back to source
                     target_links = outgoing.get(target_fp, [])
                     source_no_ext = os.path.splitext(source_fp)[0]
-                    has_backlink = any(
-                        source_no_ext == tl or source_no_ext in tl
-                        for tl in target_links
-                    )
+                    has_backlink = any(source_no_ext == tl or source_no_ext in tl for tl in target_links)
                     if not has_backlink:
-                        issues["missing_backlinks"].append({
-                            "source": source_fp,
-                            "target": target_fp,
-                        })
+                        issues["missing_backlinks"].append(
+                            {
+                                "source": source_fp,
+                                "target": target_fp,
+                            }
+                        )
 
     # 4. Empty notes: body < 200 characters
     for row in all_notes:
         body = row["body"] or ""
         if len(body.strip()) < 200:
-            issues["empty_notes"].append({
-                "filepath": row["filepath"],
-                "title": row["title"],
-                "chars": len(body.strip()),
-            })
+            issues["empty_notes"].append(
+                {
+                    "filepath": row["filepath"],
+                    "title": row["title"],
+                    "chars": len(body.strip()),
+                }
+            )
 
     # 5. Uncompiled daily logs
     logs_dir = os.path.join(vault_path, "daily-logs")
@@ -863,19 +891,23 @@ def lint_vault(vault_path: str) -> dict:
     for row in all_notes:
         tags = json.loads(row["tags"]) if row["tags"] else []
         if not tags:
-            issues["notes_without_tags"].append({
-                "filepath": row["filepath"],
-                "title": row["title"],
-            })
+            issues["notes_without_tags"].append(
+                {
+                    "filepath": row["filepath"],
+                    "title": row["title"],
+                }
+            )
 
     # 7. Notes without aliases
     for row in all_notes:
         aliases = json.loads(row["aliases"]) if row["aliases"] else []
         if not aliases:
-            issues["notes_without_aliases"].append({
-                "filepath": row["filepath"],
-                "title": row["title"],
-            })
+            issues["notes_without_aliases"].append(
+                {
+                    "filepath": row["filepath"],
+                    "title": row["title"],
+                }
+            )
 
     conn.close()
 
@@ -918,7 +950,8 @@ def query_vault(query: str, vault_path: str) -> str:
 
     context = "\n\n---\n\n".join(context_parts)
 
-    prompt = f"""Based on the following notes from my engineering knowledge vault, answer this question concisely and practically.
+    prompt = f"""Based on the following notes from my engineering knowledge vault,
+answer this question concisely and practically.
 
 If the notes contain the answer, give it directly with specific details.
 If the notes are only partially relevant, say what you found and what's missing.
@@ -941,18 +974,31 @@ VAULT NOTES:
 
 # ─── CLI ───
 
+
 def main():
     parser = argparse.ArgumentParser(description="Memo vault engine")
-    parser.add_argument("command", choices=[
-        "index-file", "search", "query", "dedup", "lint", "list", "stats",
-        "reindex", "warm-up", "obsidian-info"
-    ])
+    parser.add_argument(
+        "command",
+        choices=[
+            "index-file",
+            "search",
+            "query",
+            "dedup",
+            "lint",
+            "list",
+            "stats",
+            "reindex",
+            "warm-up",
+            "obsidian-info",
+        ],
+    )
     parser.add_argument("query_text", nargs="?", default="", metavar="query")
     parser.add_argument("--vault", default="", help="Path to vault root")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--threshold", type=float, default=0.0)
-    parser.add_argument("--incremental", action="store_true",
-                        help="Incremental reindex: only changed files (default for cron)")
+    parser.add_argument(
+        "--incremental", action="store_true", help="Incremental reindex: only changed files (default for cron)"
+    )
 
     args = parser.parse_args()
     vault = os.path.expanduser(args.vault) if args.vault else ""
