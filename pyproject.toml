@@ -1,6 +1,6 @@
 [project]
 name = "claude-memo"
-version = "0.1.0"
+version = "1.0.0"
 description = "Persistent engineering memory for Claude Code — automatic capture and semantic search"
 readme = "README.md"
 license = { text = "MIT" }
