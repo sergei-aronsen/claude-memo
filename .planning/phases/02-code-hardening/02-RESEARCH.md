@@ -302,7 +302,7 @@ mypy scripts/memo_engine.py scripts/auto_memo.py
 
 **If this table is empty:** All other claims were verified or cited via tool calls.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Whether `py.typed` marker is needed**
    - What we know: `py.typed` signals to mypy that a package ships inline types (PEP 561). It's relevant for installable packages consumed by other code.
