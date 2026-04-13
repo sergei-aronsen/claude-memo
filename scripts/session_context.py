@@ -117,11 +117,26 @@ def main():
 
     cwd = hook_input.get("cwd", os.getcwd())
 
-    # Get vault path from environment or default
-    vault_path = os.environ.get("MEMO_VAULT_PATH", os.path.expanduser("~/memo-vault"))
+    # Get vault path from environment or --vault arg
+    vault_path = os.environ.get("MEMO_VAULT_PATH", "")
 
-    if not os.path.exists(vault_path):
-        sys.exit(0)
+    if not vault_path:
+        for i, arg in enumerate(sys.argv):
+            if arg == "--vault" and i + 1 < len(sys.argv):
+                vault_path = os.path.expanduser(sys.argv[i + 1])
+
+    if not vault_path:
+        default = os.path.expanduser("~/memo-vault")
+        if os.path.exists(default):
+            vault_path = default
+        else:
+            print(
+                "Error: MEMO_VAULT_PATH is not set and ~/memo-vault does not exist.\n"
+                "Set the environment variable: export MEMO_VAULT_PATH=/path/to/your/vault\n"
+                "Or pass --vault /path/to/your/vault",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     project_name = get_project_name(cwd)
     if not project_name:

@@ -96,7 +96,17 @@ def main():
                 vault_path = os.path.expanduser(sys.argv[i + 1])
 
     if not vault_path:
-        vault_path = os.path.expanduser("~/memo-vault")
+        default = os.path.expanduser("~/memo-vault")
+        if os.path.exists(default):
+            vault_path = default
+        else:
+            print(
+                "Error: MEMO_VAULT_PATH is not set and ~/memo-vault does not exist.\n"
+                "Set the environment variable: export MEMO_VAULT_PATH=/path/to/your/vault\n"
+                "Or pass --vault /path/to/your/vault",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Read hook input from stdin
     try:
