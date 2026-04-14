@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.egg-info/
+dist/
+build/
+
+# Vault runtime data (never commit)
+.memo/
+
+# Local Claude Code settings (never commit)
+.claude/
+
+# GSD planning artifacts (internal development)
+.planning/
