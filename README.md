@@ -2,7 +2,7 @@
 
 Persistent engineering memory for Claude Code. Automatic capture, semantic search, cross-project intelligence.
 
-![CI](https://github.com/USERNAME/claude-memo/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/sergei-aronsen/claude-memo/actions/workflows/ci.yml/badge.svg)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
@@ -64,7 +64,7 @@ $ claude
 ### 1. Clone
 
 ```bash
-git clone https://github.com/USERNAME/claude-memo.git ~/.claude/skills/memo-skill
+git clone https://github.com/sergei-aronsen/claude-memo.git ~/.claude/skills/memo-skill
 ```
 
 ### 2. Install dependencies

@@ -35,4 +35,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scripts now exit with explicit error when MEMO_VAULT_PATH is not set (instead of silent failure)
 - Ruff and mypy pass cleanly on all modules
 
-[1.0.0]: https://github.com/USERNAME/claude-memo/releases/tag/v1.0.0
+[1.0.0]: https://github.com/sergei-aronsen/claude-memo/releases/tag/v1.0.0

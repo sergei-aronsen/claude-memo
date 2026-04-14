@@ -3,7 +3,7 @@
 ## Development Setup
 
 ```bash
-git clone https://github.com/USERNAME/claude-memo.git
+git clone https://github.com/sergei-aronsen/claude-memo.git
 cd claude-memo
 pip install -r requirements.txt
 ```
