@@ -70,6 +70,11 @@ def get_vault_path() -> str:
 # ─── Tools ───
 
 
+VALID_MEMO_TYPES = {"decision", "pattern", "debug", "insight", "tool"}
+MAX_LIMIT = 100
+MAX_TITLE_LENGTH = 200
+
+
 @mcp.tool()
 def memo_search(query: str, limit: int = 10) -> str:
     """Search the engineering memory vault using semantic + keyword search.
@@ -83,6 +88,7 @@ def memo_search(query: str, limit: int = 10) -> str:
     """
     from memo_engine import search_vault
 
+    limit = min(max(1, limit), MAX_LIMIT)
     vault = get_vault_path()
     results = search_vault(query, vault, limit=limit, threshold=0.3)
 
@@ -128,12 +134,12 @@ def memo_save(
     title: str,
     content: str,
     memo_type: str = "insight",
-    project: str = None,
-    tags: list[str] = None,
-    aliases: list[str] = None,
-    context: str = None,
-    alternatives: str = None,
-    consequences: str = None,
+    project: str | None = None,
+    tags: list[str] | None = None,
+    aliases: list[str] | None = None,
+    context: str | None = None,
+    alternatives: str | None = None,
+    consequences: str | None = None,
 ) -> str:
     """Save a new note to the engineering memory vault.
 
@@ -154,6 +160,12 @@ def memo_save(
     from memo_utils import index_memo_file, save_memo
 
     vault = get_vault_path()
+
+    # Validate inputs
+    if memo_type not in VALID_MEMO_TYPES:
+        memo_type = "insight"
+    if len(title) > MAX_TITLE_LENGTH:
+        title = title[:MAX_TITLE_LENGTH]
 
     memo = {
         "type": memo_type,
@@ -184,6 +196,7 @@ def memo_list(limit: int = 20) -> str:
     """
     from memo_engine import list_notes
 
+    limit = min(max(1, limit), MAX_LIMIT)
     vault = get_vault_path()
     notes = list_notes(vault, limit)
 
@@ -251,6 +264,7 @@ def memo_trace(concept: str, limit: int = 10) -> str:
     """
     from memo_engine import search_vault
 
+    limit = min(max(1, limit), MAX_LIMIT)
     vault = get_vault_path()
     results = search_vault(concept, vault, limit=limit * 2, threshold=0.3)
 
@@ -265,6 +279,10 @@ def memo_trace(concept: str, limit: int = 10) -> str:
 
     for r in results[:limit]:
         filepath = os.path.join(vault, r["filepath"])
+        # Path containment check
+        resolved = os.path.realpath(filepath)
+        if not resolved.startswith(os.path.realpath(vault) + os.sep):
+            continue
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -299,6 +317,7 @@ def memo_find_duplicates(threshold: float = 0.85) -> str:
     """
     from memo_engine import find_duplicates
 
+    threshold = max(0.0, min(1.0, threshold))
     vault = get_vault_path()
     pairs = find_duplicates(vault, threshold)
 
@@ -307,7 +326,7 @@ def memo_find_duplicates(threshold: float = 0.85) -> str:
 
     lines = [f"Found {len(pairs)} potential duplicate pair(s):\n"]
     for p in pairs[:10]:
-        lines.append(f"- {p['title_a']} ↔ {p['title_b']} (similarity: {p['similarity']:.2f})")
+        lines.append(f"- {p['title_a']} \u2194 {p['title_b']} (similarity: {p['similarity']:.2f})")
 
     return "\n".join(lines)
 

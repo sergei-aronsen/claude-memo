@@ -98,20 +98,35 @@ def _parse_frontmatter_basic(raw_yaml: str) -> dict:
     return meta
 
 
+def _yaml_needs_quoting(value: str) -> bool:
+    """Check if a YAML string value needs quoting."""
+    special_chars = (":", "#", "[", "]", "{", "}", "'", '"', "|", ">", "&", "*", "!", "%", "@", "`")
+    return any(c in value for c in special_chars) or value.startswith(("-", "?", " ")) or "\n" in value
+
+
 def build_frontmatter(meta: dict) -> str:
     """Build YAML frontmatter string from dict."""
+    if HAS_PYYAML:
+        import yaml
+
+        yaml_str = yaml.dump(meta, default_flow_style=False, allow_unicode=True, sort_keys=False).rstrip()
+        return f"---\n{yaml_str}\n---"
+
+    # Fallback without PyYAML — quote all potentially unsafe values
     lines = ["---"]
     for key, value in meta.items():
         if isinstance(value, list):
             lines.append(f"{key}:")
             for item in value:
-                lines.append(f"  - {item}")
+                item_str = str(item)
+                if _yaml_needs_quoting(item_str):
+                    item_str = '"' + item_str.replace("\\", "\\\\").replace('"', '\\"') + '"'
+                lines.append(f"  - {item_str}")
         else:
-            # Quote values containing colons
-            if isinstance(value, str) and ":" in value:
-                lines.append(f'{key}: "{value}"')
-            else:
-                lines.append(f"{key}: {value}")
+            str_value = str(value)
+            if isinstance(value, str) and _yaml_needs_quoting(str_value):
+                str_value = '"' + str_value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+            lines.append(f"{key}: {str_value}")
     lines.append("---")
     return "\n".join(lines)
 
@@ -143,6 +158,13 @@ PROVIDER_DEFAULTS = {
     },
 }
 
+# Allowed URL prefixes for API endpoints (SSRF protection)
+ALLOWED_API_URL_PREFIXES = (
+    "https://api.anthropic.com/",
+    "https://openrouter.ai/",
+    "https://api.openai.com/",
+)
+
 
 def _get_provider_config() -> dict:
     """Resolve provider, model, key, and URL from environment."""
@@ -163,6 +185,12 @@ def _get_provider_config() -> dict:
     model = os.environ.get("MEMO_MODEL") or defaults["model"]
     fallback = os.environ.get("MEMO_FALLBACK_MODEL") or defaults["fallback_model"]
     url = os.environ.get("MEMO_API_URL") or defaults["url"]
+
+    # Validate URL against allowlist (SSRF protection)
+    if not any(url.startswith(prefix) for prefix in ALLOWED_API_URL_PREFIXES):
+        raise ValueError(
+            f"MEMO_API_URL '{url}' is not in the allowed list. Allowed prefixes: {', '.join(ALLOWED_API_URL_PREFIXES)}"
+        )
 
     return {
         "provider": provider,
@@ -202,7 +230,7 @@ def call_llm(prompt: str, max_tokens: int = 4000, system: str | None = None) -> 
     return None
 
 
-def _call_model(prompt, max_tokens, system, config, model) -> str | None:
+def _call_model(prompt: str, max_tokens: int, system: str | None, config: dict[str, str], model: str) -> str | None:
     """Call a specific model. Returns text or None on failure."""
     cfg = {**config, "model": model}
     if config["provider"] == "anthropic":
@@ -211,7 +239,7 @@ def _call_model(prompt, max_tokens, system, config, model) -> str | None:
         return _call_openai_compat(prompt, max_tokens, system, cfg)
 
 
-def _call_anthropic(prompt, max_tokens, system, config) -> str | None:
+def _call_anthropic(prompt: str, max_tokens: int, system: str | None, config: dict[str, str]) -> str | None:
     """Call Anthropic API (Messages format)."""
     body = {
         "model": config["model"],
@@ -239,11 +267,15 @@ def _call_anthropic(prompt, max_tokens, system, config) -> str | None:
             if isinstance(content, list) and len(content) > 0:
                 return content[0].get("text", "")
             return None
-    except Exception:
+    except Exception as e:
+        # Log to stderr for hook scripts; don't crash
+        import sys
+
+        print(f"[memo] Anthropic API call failed: {e}", file=sys.stderr)
         return None
 
 
-def _call_openai_compat(prompt, max_tokens, system, config) -> str | None:
+def _call_openai_compat(prompt: str, max_tokens: int, system: str | None, config: dict[str, str]) -> str | None:
     """Call OpenAI-compatible API (OpenRouter, OpenAI, etc.)."""
     messages = []
     if system:
@@ -273,7 +305,10 @@ def _call_openai_compat(prompt, max_tokens, system, config) -> str | None:
             if choices and len(choices) > 0:
                 return choices[0].get("message", {}).get("content", "")
             return None
-    except Exception:
+    except Exception as e:
+        import sys
+
+        print(f"[memo] OpenAI-compat API call failed: {e}", file=sys.stderr)
         return None
 
 
@@ -404,7 +439,8 @@ def save_memo(
         append_to_index(vault_path, filepath, title, source)
 
         return filepath
-    except Exception:
+    except Exception as e:
+        memo_log(vault_path, f"save_memo failed: {e}", "error")
         return None
 
 
@@ -432,8 +468,42 @@ def append_to_index(vault_path: str, filepath: str, title: str, source: str):
 
         with open(index_path, "a", encoding="utf-8") as f:
             f.write(entry)
-    except Exception:
-        pass
+    except Exception as e:
+        memo_log(vault_path, f"append_to_index failed: {e}", "error")
+
+
+# ─── Vault path resolution ───
+
+
+def resolve_vault_path(argv: list[str] | None = None) -> str:
+    """Resolve vault path from env, CLI args, or default.
+
+    Priority: MEMO_VAULT_PATH env > --vault CLI arg > ~/memo-vault default.
+    Exits with error if no vault found.
+    """
+    vault_path = os.environ.get("MEMO_VAULT_PATH", "")
+
+    if not vault_path and argv:
+        for i, arg in enumerate(argv):
+            if arg == "--vault" and i + 1 < len(argv):
+                vault_path = os.path.expanduser(argv[i + 1])
+
+    if not vault_path:
+        default = os.path.expanduser("~/memo-vault")
+        if os.path.exists(default):
+            vault_path = default
+        else:
+            import sys
+
+            print(
+                "Error: MEMO_VAULT_PATH is not set and ~/memo-vault does not exist.\n"
+                "Set the environment variable: export MEMO_VAULT_PATH=/path/to/your/vault\n"
+                "Or pass --vault /path/to/your/vault",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    return vault_path
 
 
 # ─── Logging ───
@@ -448,20 +518,26 @@ def memo_log(vault_path: str, message: str, component: str = "memo"):
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] [{component}] {message}\n")
     except Exception:
-        pass
+        pass  # Cannot log a logging failure — silently ignore
 
 
 def index_memo_file(filepath: str, vault_path: str):
-    """Index a memo file in the search engine."""
-    engine = os.path.join(os.path.dirname(__file__), "memo_engine.py")
-    if os.path.exists(engine):
-        try:
-            import subprocess
+    """Index a memo file in the search engine (direct call, no subprocess)."""
+    try:
+        import sys
 
-            subprocess.run(
-                ["python3", engine, "index-file", filepath, "--vault", vault_path],
-                capture_output=True,
-                timeout=30,
-            )
-        except Exception:
-            pass
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        if script_dir not in sys.path:
+            sys.path.insert(0, script_dir)
+
+        from memo_engine import EmbeddingsStore, VaultLock, index_file, init_db
+
+        with VaultLock(vault_path):
+            conn = init_db(vault_path)
+            store = EmbeddingsStore(vault_path)
+            try:
+                index_file(filepath, vault_path, conn, store)
+            finally:
+                conn.close()
+    except Exception as e:
+        memo_log(vault_path, f"index_memo_file failed for {filepath}: {e}", "error")

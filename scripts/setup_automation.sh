@@ -25,7 +25,7 @@ echo "════════════════════════�
 
 # ─── 1. Auto-reindex cron (every 30 min) ───
 
-REINDEX_CRON="*/30 * * * * cd $VAULT_PATH && $PYTHON3 $MEMO_ENGINE reindex --vault $VAULT_PATH --incremental >> $VAULT_PATH/.memo/reindex.log 2>&1"
+REINDEX_CRON="*/30 * * * * cd \"$VAULT_PATH\" && \"$PYTHON3\" \"$MEMO_ENGINE\" reindex --vault \"$VAULT_PATH\" --incremental >> \"$VAULT_PATH/.memo/reindex.log\" 2>&1"
 
 # Check if cron already exists
 if crontab -l 2>/dev/null | grep -q "memo_engine.py reindex"; then
@@ -37,7 +37,7 @@ fi
 
 # ─── 2. Git auto-commit + push (every hour) ───
 
-GIT_CRON="0 * * * * cd $VAULT_PATH && git add -A && git diff --cached --quiet || git commit -m 'auto: vault sync \$(date +\\%Y-\\%m-\\%d\\ \\%H:\\%M)' && git push origin main 2>/dev/null || true"
+GIT_CRON="0 * * * * cd \"$VAULT_PATH\" && git add -A && git diff --cached --quiet || git commit -m 'auto: vault sync \$(date +\\%Y-\\%m-\\%d\\ \\%H:\\%M)' && git push origin main 2>/dev/null || true"
 
 if crontab -l 2>/dev/null | grep -q "vault sync"; then
     echo "  ✓ Git sync cron already installed"
@@ -56,7 +56,7 @@ fi
 # ─── 3. Compile daily logs → wiki articles (daily at 18:00) ───
 
 COMPILE_SCRIPT="$SCRIPT_DIR/compile_logs.py"
-COMPILE_CRON="0 18 * * * $PYTHON3 $COMPILE_SCRIPT --vault $VAULT_PATH >> $VAULT_PATH/.memo/compile.log 2>&1"
+COMPILE_CRON="0 18 * * * \"$PYTHON3\" \"$COMPILE_SCRIPT\" --vault \"$VAULT_PATH\" >> \"$VAULT_PATH/.memo/compile.log\" 2>&1"
 
 if crontab -l 2>/dev/null | grep -q "compile_logs.py"; then
     echo "  ✓ Compile cron already installed"

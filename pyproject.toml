@@ -14,7 +14,14 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]
-auto = ["anthropic>=0.30"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.9",
+    "mypy>=1.8",
+    "bandit>=1.8",
+    "pip-audit>=2.7",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.6,<0.12"]
@@ -26,10 +33,6 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
-
-[tool.ruff.lint.per-file-ignores]
-"scripts/save_raw_log.py" = ["E722"]
-"scripts/pre_compact_save.py" = ["E722"]
 
 [tool.mypy]
 python_version = "3.11"

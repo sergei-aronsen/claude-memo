@@ -30,20 +30,26 @@ VAULT_PATH="${MEMO_VAULT_PATH:-$HOME/memo-vault}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ─── Stage 1: Save raw log (fast, inline) ───
-# Read stdin, save to temp, pipe to save_raw_log.py
-TMPFILE=$(mktemp /tmp/auto_memo_input.XXXXXX.json)
+# Read stdin, save to temp file in vault's .memo dir (not /tmp — avoids sensitive data in shared dirs)
+MEMO_TMP_DIR="${VAULT_PATH}/.memo/tmp"
+mkdir -p "$MEMO_TMP_DIR"
+TMPFILE=$(mktemp "${MEMO_TMP_DIR}/auto_memo_input.XXXXXX.json")
+
+# Clean up temp file on exit (handles all exit paths including Stage 2 failures)
+cleanup() { rm -f "$TMPFILE"; }
+trap cleanup EXIT
+
 cat > "$TMPFILE"
 
 python3 "$SCRIPT_DIR/save_raw_log.py" --vault "$VAULT_PATH" < "$TMPFILE" 2>/dev/null || true
 
 # ─── Stage 2: Classify (detached, background) ───
 # nohup + disown: survives Claude Code exit
-nohup python3 "$SCRIPT_DIR/auto_memo.py" --vault "$VAULT_PATH" < "$TMPFILE" \
-    >> "${VAULT_PATH}/.memo/auto_memo.log" 2>&1 &
-disown
+# Copy tmpfile for background process since trap will clean the original
+TMPFILE_BG=$(mktemp "${MEMO_TMP_DIR}/auto_memo_bg.XXXXXX.json")
+cp "$TMPFILE" "$TMPFILE_BG"
 
-# Clean up temp file after delay
-(sleep 120 && rm -f "$TMPFILE") &
+nohup bash -c "python3 \"$SCRIPT_DIR/auto_memo.py\" --vault \"$VAULT_PATH\" < \"$TMPFILE_BG\" >> \"${VAULT_PATH}/.memo/auto_memo.log\" 2>&1; rm -f \"$TMPFILE_BG\"" &
 disown
 
 exit 0

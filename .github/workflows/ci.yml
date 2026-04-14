@@ -33,7 +33,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install dev tools
-        run: pip install ruff mypy bandit==1.9.4
+        run: pip install ruff mypy bandit==1.9.4 pip-audit
 
       - name: Lint (ruff)
         run: ruff check scripts/
@@ -46,3 +46,6 @@ jobs:
 
       - name: Security scan (bandit)
         run: bandit -r scripts/ -ll
+
+      - name: Dependency audit
+        run: pip-audit -r requirements.txt

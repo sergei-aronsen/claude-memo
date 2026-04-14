@@ -40,7 +40,7 @@ from datetime import datetime
 from typing import Any
 
 import numpy as np
-from memo_utils import call_haiku, parse_frontmatter
+from memo_utils import call_llm, parse_frontmatter
 
 # ─── Model config ───
 
@@ -148,6 +148,7 @@ def init_db(vault_path: str) -> sqlite3.Connection:
     db_path = get_db_path(vault_path)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
 
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS notes (
@@ -206,6 +207,8 @@ class EmbeddingsStore:
         self.map_path = get_id_map_path(vault_path)
         self.embeddings: np.ndarray | None = None  # (N, D) numpy array
         self.id_map: list[int] = []  # list of note IDs, index-aligned with embeddings
+        self._id_index: dict[int, int] = {}  # note_id -> array index (O(1) lookup)
+        self._pending: list[np.ndarray] = []  # batch buffer for deferred adds
         self._load()
 
     def _load(self):
@@ -216,6 +219,7 @@ class EmbeddingsStore:
         else:
             self.embeddings = None
             self.id_map = []
+        self._id_index = {nid: i for i, nid in enumerate(self.id_map)}
 
     def _save(self):
         ensure_memo_dir(self.vault_path)
@@ -228,38 +232,57 @@ class EmbeddingsStore:
         """Add or update embedding for a note.
 
         Args:
-            defer_save: If True, skip disk write (for batch operations).
-                        Call flush() when done.
+            defer_save: If True, skip disk write and buffer new embeddings.
+                        Call flush() when done — single vstack for the batch.
         """
         embedding = embedding.reshape(1, -1)
 
-        if note_id in self.id_map:
-            idx = self.id_map.index(note_id)
-            assert self.embeddings is not None  # id_map non-empty implies embeddings loaded
+        if note_id in self._id_index:
+            idx = self._id_index[note_id]
+            assert self.embeddings is not None
             self.embeddings[idx] = embedding
         else:
-            if self.embeddings is None:
-                self.embeddings = embedding
+            if defer_save:
+                # Buffer for batch vstack in flush()
+                self._id_index[note_id] = len(self.id_map)
+                self.id_map.append(note_id)
+                self._pending.append(embedding)
             else:
-                self.embeddings = np.vstack([self.embeddings, embedding])
-            self.id_map.append(note_id)
+                if self.embeddings is None:
+                    self.embeddings = embedding
+                else:
+                    self.embeddings = np.vstack([self.embeddings, embedding])
+                self._id_index[note_id] = len(self.id_map)
+                self.id_map.append(note_id)
 
         if not defer_save:
             self._save()
 
     def flush(self):
-        """Write current state to disk. Call after batch add operations."""
+        """Write current state to disk. Call after batch add operations.
+
+        Applies pending embeddings with a single vstack (avoids O(N^2) copies).
+        """
+        if self._pending:
+            batch = np.vstack(self._pending)
+            if self.embeddings is None:
+                self.embeddings = batch
+            else:
+                self.embeddings = np.vstack([self.embeddings, batch])
+            self._pending.clear()
         self._save()
 
     def remove(self, note_id: int):
         """Remove embedding for a note."""
-        if note_id in self.id_map:
-            idx = self.id_map.index(note_id)
+        if note_id in self._id_index:
+            idx = self._id_index.pop(note_id)
             self.id_map.pop(idx)
             if self.embeddings is not None:
                 self.embeddings = np.delete(self.embeddings, idx, axis=0)
                 if len(self.embeddings) == 0:
                     self.embeddings = None
+            # Rebuild index after removal (indices shifted)
+            self._id_index = {nid: i for i, nid in enumerate(self.id_map)}
             self._save()
 
     def search(self, query_embedding: np.ndarray, top_k: int = 10) -> list[tuple[int, float]]:
@@ -299,6 +322,8 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
         defer_save: Skip disk write for embeddings (for batch operations).
     """
     filepath = os.path.abspath(filepath)
+    if not _path_in_vault(vault_path, filepath):
+        raise ValueError(f"File {filepath} is outside vault {vault_path}")
     rel_path = os.path.relpath(filepath, vault_path)
 
     with open(filepath, "r", encoding="utf-8") as f:
@@ -388,173 +413,180 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
 def search_vault(query: str, vault_path: str, limit: int = 10, threshold: float = 0.0):
     """Combined semantic + keyword search."""
     conn = init_db(vault_path)
-    store = EmbeddingsStore(vault_path)
-
-    results = {}
-
-    # 1. Semantic search (e5 models need "query: " prefix)
-    query_emb = encode_query(query)
-    sem_results = store.search(query_emb, top_k=limit * 2)
-
-    for note_id, score in sem_results:
-        if score >= threshold:
-            results[note_id] = {"semantic_score": score, "keyword_score": 0.0}
-
-    # 2. Keyword search via FTS5
     try:
-        # Escape special FTS5 characters
-        safe_query = re.sub(r"[^\w\s]", " ", query)
-        terms = safe_query.split()
-        fts_query = " OR ".join(terms)
+        store = EmbeddingsStore(vault_path)
 
-        rows = conn.execute(
-            """
-            SELECT rowid, rank FROM notes_fts WHERE notes_fts MATCH ?
-            ORDER BY rank LIMIT ?
-        """,
-            (fts_query, limit * 2),
-        ).fetchall()
+        results = {}
 
-        for row in rows:
-            note_id = row["rowid"]
-            # Normalize FTS rank to 0-1 range (rank is negative, lower = better)
-            keyword_score = min(1.0, 1.0 / (1.0 + abs(row["rank"])))
-            if note_id in results:
-                results[note_id]["keyword_score"] = keyword_score
-            else:
-                results[note_id] = {"semantic_score": 0.0, "keyword_score": keyword_score}
-    except Exception:
-        pass  # FTS might fail on empty db or bad query
+        # 1. Semantic search (e5 models need "query: " prefix)
+        query_emb = encode_query(query)
+        sem_results = store.search(query_emb, top_k=limit * 2)
 
-    # 3. Combine scores (weighted: 60% semantic, 40% keyword)
-    scored = []
-    for note_id, scores in results.items():
-        combined = 0.6 * scores["semantic_score"] + 0.4 * scores["keyword_score"]
-        scored.append((note_id, combined, scores["semantic_score"], scores["keyword_score"]))
+        for note_id, score in sem_results:
+            if score >= threshold:
+                results[note_id] = {"semantic_score": score, "keyword_score": 0.0}
 
-    scored.sort(key=lambda x: x[1], reverse=True)
-    scored = scored[:limit]
+        # 2. Keyword search via FTS5
+        try:
+            # Escape special FTS5 characters and quote terms to prevent operator interpretation
+            safe_query = re.sub(r"[^\w\s]", " ", query)
+            terms = safe_query.split()
+            fts_query = " OR ".join(f'"{term}"' for term in terms)
 
-    # 4. Fetch note metadata
-    output = []
-    for note_id, combined, sem, kw in scored:
-        row = conn.execute(
-            "SELECT filepath, title, type, project, tags, created FROM notes WHERE id = ?", (note_id,)
-        ).fetchone()
-        if row:
-            output.append(
-                {
-                    "id": note_id,
-                    "filepath": row["filepath"],
-                    "title": row["title"],
-                    "type": row["type"],
-                    "project": row["project"],
-                    "tags": row["tags"],
-                    "created": row["created"],
-                    "score": round(combined, 3),
-                    "semantic": round(sem, 3),
-                    "keyword": round(kw, 3),
-                }
-            )
+            rows = conn.execute(
+                """
+                SELECT rowid, rank FROM notes_fts WHERE notes_fts MATCH ?
+                ORDER BY rank LIMIT ?
+            """,
+                (fts_query, limit * 2),
+            ).fetchall()
 
-    conn.close()
-    return output
+            for row in rows:
+                note_id = row["rowid"]
+                # Normalize FTS rank to 0-1 range (rank is negative, lower = better)
+                keyword_score = min(1.0, 1.0 / (1.0 + abs(row["rank"])))
+                if note_id in results:
+                    results[note_id]["keyword_score"] = keyword_score
+                else:
+                    results[note_id] = {"semantic_score": 0.0, "keyword_score": keyword_score}
+        except Exception:
+            pass  # FTS might fail on empty db or bad query
+
+        # 3. Combine scores (weighted: 60% semantic, 40% keyword)
+        scored = []
+        for note_id, scores in results.items():
+            combined = 0.6 * scores["semantic_score"] + 0.4 * scores["keyword_score"]
+            scored.append((note_id, combined, scores["semantic_score"], scores["keyword_score"]))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        scored = scored[:limit]
+
+        # 4. Fetch note metadata
+        output = []
+        for note_id, combined, sem, kw in scored:
+            row = conn.execute(
+                "SELECT filepath, title, type, project, tags, created FROM notes WHERE id = ?", (note_id,)
+            ).fetchone()
+            if row:
+                output.append(
+                    {
+                        "id": note_id,
+                        "filepath": row["filepath"],
+                        "title": row["title"],
+                        "type": row["type"],
+                        "project": row["project"],
+                        "tags": row["tags"],
+                        "created": row["created"],
+                        "score": round(combined, 3),
+                        "semantic": round(sem, 3),
+                        "keyword": round(kw, 3),
+                    }
+                )
+
+        return output
+    finally:
+        conn.close()
 
 
 def find_duplicates(vault_path: str, threshold: float = 0.7):
     """Find semantically similar note pairs."""
     conn = init_db(vault_path)
-    store = EmbeddingsStore(vault_path)
+    try:
+        store = EmbeddingsStore(vault_path)
 
-    if store.embeddings is None or len(store.id_map) < 2:
-        print("Not enough notes to check for duplicates.")
+        if store.embeddings is None or len(store.id_map) < 2:
+            print("Not enough notes to check for duplicates.")
+            return []
+
+        # Compute pairwise similarities
+        emb = store.embeddings
+        norms = np.linalg.norm(emb, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        normalized = emb / norms
+        sim_matrix = normalized @ normalized.T
+
+        pairs: list[dict[str, Any]] = []
+        n = len(store.id_map)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if sim_matrix[i, j] >= threshold:
+                    id_a = store.id_map[i]
+                    id_b = store.id_map[j]
+                    row_a = conn.execute("SELECT filepath, title FROM notes WHERE id=?", (id_a,)).fetchone()
+                    row_b = conn.execute("SELECT filepath, title FROM notes WHERE id=?", (id_b,)).fetchone()
+                    if row_a and row_b:
+                        pairs.append(
+                            {
+                                "title_a": row_a["title"],
+                                "path_a": row_a["filepath"],
+                                "title_b": row_b["title"],
+                                "path_b": row_b["filepath"],
+                                "similarity": round(float(sim_matrix[i, j]), 3),
+                            }
+                        )
+
+        pairs.sort(key=lambda x: x["similarity"], reverse=True)
+        return pairs
+    finally:
         conn.close()
-        return []
-
-    # Compute pairwise similarities
-    emb = store.embeddings
-    norms = np.linalg.norm(emb, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1, norms)
-    normalized = emb / norms
-    sim_matrix = normalized @ normalized.T
-
-    pairs: list[dict[str, Any]] = []
-    n = len(store.id_map)
-    for i in range(n):
-        for j in range(i + 1, n):
-            if sim_matrix[i, j] >= threshold:
-                id_a = store.id_map[i]
-                id_b = store.id_map[j]
-                row_a = conn.execute("SELECT filepath, title FROM notes WHERE id=?", (id_a,)).fetchone()
-                row_b = conn.execute("SELECT filepath, title FROM notes WHERE id=?", (id_b,)).fetchone()
-                if row_a and row_b:
-                    pairs.append(
-                        {
-                            "note_a": {"id": id_a, "title": row_a["title"], "path": row_a["filepath"]},
-                            "note_b": {"id": id_b, "title": row_b["title"], "path": row_b["filepath"]},
-                            "similarity": round(float(sim_matrix[i, j]), 3),
-                        }
-                    )
-
-    pairs.sort(key=lambda x: x["similarity"], reverse=True)
-    conn.close()
-    return pairs
 
 
 def list_notes(vault_path: str, limit: int = 10):
     """List recent notes."""
     conn = init_db(vault_path)
-    rows = conn.execute(
-        """
-        SELECT filepath, title, type, project, tags, created
-        FROM notes ORDER BY created DESC LIMIT ?
-    """,
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        rows = conn.execute(
+            """
+            SELECT filepath, title, type, project, tags, created
+            FROM notes ORDER BY created DESC LIMIT ?
+        """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def vault_stats(vault_path: str):
     """Aggregate vault statistics."""
     conn = init_db(vault_path)
+    try:
+        total = conn.execute("SELECT COUNT(*) as c FROM notes").fetchone()["c"]
+        by_type = conn.execute("SELECT type, COUNT(*) as c FROM notes GROUP BY type ORDER BY c DESC").fetchall()
+        by_project = conn.execute(
+            "SELECT project, COUNT(*) as c FROM notes WHERE project IS NOT NULL GROUP BY project ORDER BY c DESC"
+        ).fetchall()
 
-    total = conn.execute("SELECT COUNT(*) as c FROM notes").fetchone()["c"]
-    by_type = conn.execute("SELECT type, COUNT(*) as c FROM notes GROUP BY type ORDER BY c DESC").fetchall()
-    by_project = conn.execute(
-        "SELECT project, COUNT(*) as c FROM notes WHERE project IS NOT NULL GROUP BY project ORDER BY c DESC"
-    ).fetchall()
+        # Most connected notes (by wikilink count)
+        rows = conn.execute("SELECT title, wikilinks FROM notes").fetchall()
+        link_counts = []
+        for r in rows:
+            links = json.loads(r["wikilinks"]) if r["wikilinks"] else []
+            link_counts.append((r["title"], len(links)))
+        link_counts.sort(key=lambda x: x[1], reverse=True)
 
-    # Most connected notes (by wikilink count)
-    rows = conn.execute("SELECT title, wikilinks FROM notes").fetchall()
-    link_counts = []
-    for r in rows:
-        links = json.loads(r["wikilinks"]) if r["wikilinks"] else []
-        link_counts.append((r["title"], len(links)))
-    link_counts.sort(key=lambda x: x[1], reverse=True)
+        # Orphans (no incoming or outgoing links)
+        all_links: set[str] = set()
+        for r in rows:
+            links = json.loads(r["wikilinks"]) if r["wikilinks"] else []
+            all_links.update(links)
 
-    # Orphans (no incoming or outgoing links)
-    all_links: set[str] = set()
-    for r in rows:
-        links = json.loads(r["wikilinks"]) if r["wikilinks"] else []
-        all_links.update(links)
+        # Tag frequency
+        tag_freq: dict[str, int] = {}
+        for r in conn.execute("SELECT tags FROM notes").fetchall():
+            tags = json.loads(r["tags"]) if r["tags"] else []
+            for tag in tags:
+                tag_freq[tag] = tag_freq.get(tag, 0) + 1
 
-    # Tag frequency
-    tag_freq: dict[str, int] = {}
-    for r in conn.execute("SELECT tags FROM notes").fetchall():
-        tags = json.loads(r["tags"]) if r["tags"] else []
-        for tag in tags:
-            tag_freq[tag] = tag_freq.get(tag, 0) + 1
-
-    conn.close()
-
-    return {
-        "total_notes": total,
-        "by_type": [(dict(r)["type"] or "untyped", dict(r)["c"]) for r in by_type],
-        "by_project": [(dict(r)["project"], dict(r)["c"]) for r in by_project],
-        "most_connected": link_counts[:10],
-        "top_tags": sorted(tag_freq.items(), key=lambda x: x[1], reverse=True)[:15],
-    }
+        return {
+            "total_notes": total,
+            "by_type": [(dict(r)["type"] or "untyped", dict(r)["c"]) for r in by_type],
+            "by_project": [(dict(r)["project"], dict(r)["c"]) for r in by_project],
+            "most_connected": link_counts[:10],
+            "top_tags": sorted(tag_freq.items(), key=lambda x: x[1], reverse=True)[:15],
+        }
+    finally:
+        conn.close()
 
 
 def reindex_vault(vault_path: str, full: bool = True):
@@ -613,7 +645,7 @@ def reindex_vault(vault_path: str, full: bool = True):
 
         # Index only changed/new files
         for rel_path, abs_path in current_files.items():
-            file_hash = hashlib.sha256(open(abs_path, "rb").read()).hexdigest()[:16]
+            file_hash = compute_file_hash(abs_path)
             if rel_path in existing and existing[rel_path][0] == file_hash:
                 skipped += 1
                 continue
@@ -753,6 +785,13 @@ class ObsidianCLI:
         return info
 
 
+def _path_in_vault(vault_path: str, filepath: str) -> bool:
+    """Check that a resolved path stays within the vault (path traversal protection)."""
+    resolved = os.path.realpath(filepath)
+    vault_real = os.path.realpath(vault_path)
+    return resolved.startswith(vault_real + os.sep) or resolved == vault_real
+
+
 def lint_vault(vault_path: str) -> dict:
     """Run 7 health checks on the vault. Returns issues found.
 
@@ -793,7 +832,6 @@ def lint_vault(vault_path: str) -> dict:
     all_titles = {row["title"] for row in all_notes}
 
     # Build maps
-    {row["filepath"]: row["title"] for row in all_notes}
     title_to_filepath = {}
     for row in all_notes:
         title_to_filepath[row["title"]] = row["filepath"]
@@ -935,6 +973,8 @@ def query_vault(query: str, vault_path: str) -> str:
     context_parts = []
     for r in results[:3]:  # Top 3
         filepath = os.path.join(vault_path, r["filepath"])
+        if not _path_in_vault(vault_path, filepath):
+            continue  # Skip — path escapes vault
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -963,7 +1003,7 @@ VAULT NOTES:
 {context}"""
 
     # Use secure API client (no API key in ps, no curl dependency)
-    answer = call_haiku(prompt, max_tokens=2000)
+    answer = call_llm(prompt, max_tokens=2000)
     if answer:
         sources = "\n".join(f"  - {r['title']} ({r['filepath']})" for r in results[:3])
         return f"{answer}\n\n---\nSources:\n{sources}"

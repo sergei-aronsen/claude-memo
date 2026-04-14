@@ -29,25 +29,11 @@ def main():
     transcript_path = hook_input.get("transcript_path", "")
     session_id = hook_input.get("session_id", "unknown")
 
-    vault_path = os.environ.get("MEMO_VAULT_PATH", "")
+    # Add scripts dir to path for memo_utils import
+    sys.path.insert(0, os.path.dirname(__file__))
+    from memo_utils import resolve_vault_path
 
-    if not vault_path:
-        for i, arg in enumerate(sys.argv):
-            if arg == "--vault" and i + 1 < len(sys.argv):
-                vault_path = os.path.expanduser(sys.argv[i + 1])
-
-    if not vault_path:
-        default = os.path.expanduser("~/memo-vault")
-        if os.path.exists(default):
-            vault_path = default
-        else:
-            print(
-                "Error: MEMO_VAULT_PATH is not set and ~/memo-vault does not exist.\n"
-                "Set the environment variable: export MEMO_VAULT_PATH=/path/to/your/vault\n"
-                "Or pass --vault /path/to/your/vault",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    vault_path = resolve_vault_path(sys.argv)
 
     logs_dir = os.path.join(vault_path, "daily-logs")
     os.makedirs(logs_dir, exist_ok=True)
@@ -68,6 +54,9 @@ def main():
             try:
                 entry = json.loads(line)
                 if isinstance(entry, dict):
+                    # Handle Claude Code nested format
+                    if "message" in entry and isinstance(entry["message"], dict):
+                        entry = entry["message"]
                     role = entry.get("role", "")
                     content = entry.get("content", "")
                     if isinstance(content, list):

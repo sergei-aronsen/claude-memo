@@ -22,7 +22,7 @@ import sys
 # Add scripts dir to path for memo_utils import
 sys.path.insert(0, os.path.dirname(__file__))
 
-from memo_utils import call_haiku, index_memo_file, memo_log, parse_json_response, save_memo
+from memo_utils import call_llm, index_memo_file, memo_log, parse_json_response, save_memo
 
 COMPILED_MARKER = "<!-- compiled -->"
 AUTO_PROCESSED_MARKER = "<!-- auto-processed"
@@ -110,7 +110,7 @@ Return [] if nothing worth saving.
 DAILY LOG:
 {content}"""
 
-    text = call_haiku(prompt, max_tokens=8000)
+    text = call_llm(prompt, max_tokens=8000)
     if not text:
         return []
 

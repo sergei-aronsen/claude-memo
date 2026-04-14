@@ -37,6 +37,11 @@ def get_project_name(cwd: str) -> str | None:
     return os.path.basename(cwd).lower()
 
 
+def _escape_like(value: str) -> str:
+    """Escape SQL LIKE wildcards in a value."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def load_project_context(vault_path: str, project_name: str) -> str | None:
     """Load project note and recent decisions from SQLite."""
     db_path = os.path.join(vault_path, ".memo", "index.db")
@@ -48,12 +53,13 @@ def load_project_context(vault_path: str, project_name: str) -> str | None:
         conn.row_factory = sqlite3.Row
 
         context_parts = []
+        safe_name = _escape_like(project_name)
 
         # 1. Find the project note
         project_row = conn.execute(
             "SELECT filepath, title, body FROM notes WHERE type='project' AND "
-            "(LOWER(project) = ? OR LOWER(title) LIKE ?)",
-            (project_name, f"%{project_name}%"),
+            "(LOWER(project) = ? OR LOWER(title) LIKE ? ESCAPE '\\')",
+            (project_name, f"%{safe_name}%"),
         ).fetchone()
 
         if project_row:
@@ -66,9 +72,9 @@ def load_project_context(vault_path: str, project_name: str) -> str | None:
         # 2. Find last 5 decisions for this project (fuzzy match)
         decisions = conn.execute(
             "SELECT title, body, created FROM notes "
-            "WHERE type='decision' AND (LOWER(project) = ? OR LOWER(project) LIKE ?) "
+            "WHERE type='decision' AND (LOWER(project) = ? OR LOWER(project) LIKE ? ESCAPE '\\') "
             "ORDER BY created DESC LIMIT 5",
-            (project_name, f"%{project_name}%"),
+            (project_name, f"%{safe_name}%"),
         ).fetchall()
 
         if decisions:
@@ -82,9 +88,9 @@ def load_project_context(vault_path: str, project_name: str) -> str | None:
         # 3. Find last 3 debug-logs (common gotchas)
         debugs = conn.execute(
             "SELECT title, created FROM notes "
-            "WHERE type='debug' AND (LOWER(project) = ? OR LOWER(project) LIKE ?) "
+            "WHERE type='debug' AND (LOWER(project) = ? OR LOWER(project) LIKE ? ESCAPE '\\') "
             "ORDER BY created DESC LIMIT 3",
-            (project_name, f"%{project_name}%"),
+            (project_name, f"%{safe_name}%"),
         ).fetchall()
 
         if debugs:
@@ -116,26 +122,11 @@ def main():
 
     cwd = hook_input.get("cwd", os.getcwd())
 
-    # Get vault path from environment or --vault arg
-    vault_path = os.environ.get("MEMO_VAULT_PATH", "")
+    # Get vault path from environment, --vault arg, or default
+    sys.path.insert(0, os.path.dirname(__file__))
+    from memo_utils import resolve_vault_path
 
-    if not vault_path:
-        for i, arg in enumerate(sys.argv):
-            if arg == "--vault" and i + 1 < len(sys.argv):
-                vault_path = os.path.expanduser(sys.argv[i + 1])
-
-    if not vault_path:
-        default = os.path.expanduser("~/memo-vault")
-        if os.path.exists(default):
-            vault_path = default
-        else:
-            print(
-                "Error: MEMO_VAULT_PATH is not set and ~/memo-vault does not exist.\n"
-                "Set the environment variable: export MEMO_VAULT_PATH=/path/to/your/vault\n"
-                "Or pass --vault /path/to/your/vault",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    vault_path = resolve_vault_path(sys.argv)
 
     project_name = get_project_name(cwd)
     if not project_name:

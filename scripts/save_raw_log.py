@@ -89,26 +89,11 @@ def save_daily_log(messages: list[dict], vault_path: str, session_id: str):
 
 
 def main():
-    vault_path = os.environ.get("MEMO_VAULT_PATH", "")
+    # Add scripts dir to path for memo_utils import
+    sys.path.insert(0, os.path.dirname(__file__))
+    from memo_utils import resolve_vault_path
 
-    # Also accept --vault argument
-    if not vault_path:
-        for i, arg in enumerate(sys.argv):
-            if arg == "--vault" and i + 1 < len(sys.argv):
-                vault_path = os.path.expanduser(sys.argv[i + 1])
-
-    if not vault_path:
-        default = os.path.expanduser("~/memo-vault")
-        if os.path.exists(default):
-            vault_path = default
-        else:
-            print(
-                "Error: MEMO_VAULT_PATH is not set and ~/memo-vault does not exist.\n"
-                "Set the environment variable: export MEMO_VAULT_PATH=/path/to/your/vault\n"
-                "Or pass --vault /path/to/your/vault",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    vault_path = resolve_vault_path(sys.argv)
 
     # Read hook input from stdin
     try:
@@ -133,7 +118,7 @@ def main():
         memo_log = os.path.join(vault_path, ".memo", "auto_memo.log")
         os.makedirs(os.path.dirname(memo_log), exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(memo_log, "a") as f:
+        with open(memo_log, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] Raw log saved: {os.path.basename(log_file)} ({len(messages)} messages)\n")
 
 

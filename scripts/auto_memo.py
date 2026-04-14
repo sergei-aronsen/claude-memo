@@ -167,9 +167,9 @@ TRANSCRIPT:
 {conversation}"""
 
     # Use secure API client (no curl, no API key in ps)
-    from memo_utils import call_haiku, memo_log, parse_json_response
+    from memo_utils import call_llm, memo_log, parse_json_response
 
-    text = call_haiku(prompt, max_tokens=4000)
+    text = call_llm(prompt, max_tokens=4000)
     if not text:
         memo_log(vault_path, "API call failed or returned empty", "auto-memo")
         return []
