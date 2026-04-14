@@ -7,13 +7,18 @@ license = { text = "MIT" }
 requires-python = ">=3.11"
 keywords = ["claude", "ai", "memory", "obsidian", "knowledge-management"]
 dependencies = [
-    "sentence-transformers==5.4.0",
-    "numpy==2.4.4",
-    "PyYAML==6.0.3",
+    "sentence-transformers>=3.0,<4",
+    "numpy>=1.26,<3",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp[cli]==1.27.0"]
+mcp = ["mcp[cli]>=1.0"]
+auto = ["anthropic>=0.30"]
+
+[build-system]
+requires = ["uv_build>=0.11.6,<0.12"]
+build-backend = "uv_build"
 
 [tool.ruff]
 line-length = 120
