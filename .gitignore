@@ -11,3 +11,6 @@ build/
 
 # Local Claude Code settings (never commit)
 .claude/
+
+# GSD planning artifacts (internal development)
+.planning/
