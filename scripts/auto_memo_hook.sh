@@ -19,13 +19,14 @@
 #     "matcher": "*",
 #     "hooks": [{
 #       "type": "command",
-#       "command": "bash ~/.claude/skills/memo-skill/scripts/auto_memo_hook.sh ~/memo-vault"
+#       "command": "bash ~/.claude/skills/memo-skill/scripts/auto_memo_hook.sh"
 #     }]
 #   }]
+#   Set MEMO_VAULT_PATH env var to override default ~/memo-vault.
 
 set -euo pipefail
 
-VAULT_PATH="${1:-$HOME/memo-vault}"
+VAULT_PATH="${MEMO_VAULT_PATH:-$HOME/memo-vault}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ─── Stage 1: Save raw log (fast, inline) ───

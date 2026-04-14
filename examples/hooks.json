@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/skills/memo-skill/scripts/auto_memo_hook.sh $MEMO_VAULT_PATH"
+            "command": "bash ~/.claude/skills/memo-skill/scripts/auto_memo_hook.sh"
           }
         ]
       }
