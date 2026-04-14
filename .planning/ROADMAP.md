@@ -79,7 +79,11 @@ Plans:
   2. `github.com/[user]/claude-memo` is accessible publicly with correct description and topics (`claude-code`, `memory`, `obsidian`, `mcp`)
   3. Repository has bug report and feature request issue templates
   4. All code is pushed and the repo is live — a visitor can clone and install from the README instructions
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Create CI workflow, issue templates, replace USERNAME placeholders
+- [ ] 04-02-PLAN.md — Create GitHub repo, push code, verify live
 
 ## Progress
 
@@ -91,4 +95,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Security & Cleanliness | 4/4 | Complete   | 2026-04-13 |
 | 2. Code Hardening | 1/3 | In Progress|  |
 | 3. Documentation | 0/2 | Not started | - |
-| 4. CI & Release | 0/? | Not started | - |
+| 4. CI & Release | 0/2 | Not started | - |
