@@ -14,14 +14,18 @@ VAULT_PATH="${1:-$HOME/memo-vault}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MEMO_ENGINE="$SCRIPT_DIR/memo_engine.py"
 
+# Resolve full path to python3 so cron can find it (cron has minimal PATH)
+PYTHON3="$(which python3)"
+
 echo "═══════════════════════════════════════════════"
 echo "  Setting up vault automation"
 echo "  Vault: $VAULT_PATH"
+echo "  Python: $PYTHON3"
 echo "═══════════════════════════════════════════════"
 
 # ─── 1. Auto-reindex cron (every 30 min) ───
 
-REINDEX_CRON="*/30 * * * * cd $VAULT_PATH && python3 $MEMO_ENGINE reindex --vault $VAULT_PATH --incremental >> $VAULT_PATH/.memo/reindex.log 2>&1"
+REINDEX_CRON="*/30 * * * * cd $VAULT_PATH && $PYTHON3 $MEMO_ENGINE reindex --vault $VAULT_PATH --incremental >> $VAULT_PATH/.memo/reindex.log 2>&1"
 
 # Check if cron already exists
 if crontab -l 2>/dev/null | grep -q "memo_engine.py reindex"; then
@@ -52,7 +56,7 @@ fi
 # ─── 3. Compile daily logs → wiki articles (daily at 18:00) ───
 
 COMPILE_SCRIPT="$SCRIPT_DIR/compile_logs.py"
-COMPILE_CRON="0 18 * * * python3 $COMPILE_SCRIPT --vault $VAULT_PATH >> $VAULT_PATH/.memo/compile.log 2>&1"
+COMPILE_CRON="0 18 * * * $PYTHON3 $COMPILE_SCRIPT --vault $VAULT_PATH >> $VAULT_PATH/.memo/compile.log 2>&1"
 
 if crontab -l 2>/dev/null | grep -q "compile_logs.py"; then
     echo "  ✓ Compile cron already installed"
@@ -64,7 +68,7 @@ fi
 # ─── 4. Model warm-up at login ───
 
 WARMUP_LINE="# Memo vault: pre-load embedding model"
-WARMUP_CMD="(python3 $MEMO_ENGINE warm-up > /dev/null 2>&1 &)"
+WARMUP_CMD="($PYTHON3 $MEMO_ENGINE warm-up > /dev/null 2>&1 &)"
 
 # Detect shell config file
 if [ -f "$HOME/.zshrc" ]; then

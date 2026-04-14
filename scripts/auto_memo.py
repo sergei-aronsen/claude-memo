@@ -53,6 +53,10 @@ def read_transcript(transcript_path: str) -> list[dict]:
                 if not isinstance(entry, dict):
                     continue
 
+                # Handle Claude Code nested format: {"type": "user", "message": {"role": "user", "content": "..."}}
+                if "message" in entry and isinstance(entry["message"], dict):
+                    entry = entry["message"]
+
                 role = entry.get("role", "")
                 content = entry.get("content", "")
 
