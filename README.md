@@ -3,7 +3,7 @@
 Persistent engineering memory for Claude Code. Automatic capture, semantic search, cross-project intelligence.
 
 ![CI](https://github.com/sergei-aronsen/claude-memo/actions/workflows/ci.yml/badge.svg)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ---
@@ -50,7 +50,7 @@ $ claude
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - Claude Code (for hooks integration)
 - ~1.5GB RAM for the embedding model
 
