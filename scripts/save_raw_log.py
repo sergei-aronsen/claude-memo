@@ -104,7 +104,18 @@ def main():
     transcript_path = hook_input.get("transcript_path", "")
     session_id = hook_input.get("session_id", "unknown")
 
+    # Defense-in-depth: the hook (auto_memo_hook.sh) already gates on transcript
+    # existence and size >= 2048 bytes. Silently exit here too in case save_raw_log.py
+    # is invoked directly with an empty/header-only transcript (e.g., subagent SessionEnd).
+    # Threshold matches the hook — see auto_memo_hook.sh for rationale. If the threshold
+    # ever changes, both files must be updated in the same commit.
+    _MIN_TRANSCRIPT_BYTES = 2048
     if not transcript_path or not os.path.exists(transcript_path):
+        sys.exit(0)
+    try:
+        if os.path.getsize(transcript_path) < _MIN_TRANSCRIPT_BYTES:
+            sys.exit(0)
+    except OSError:
         sys.exit(0)
 
     messages = read_last_messages(transcript_path)
