@@ -84,7 +84,8 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+- **Audit follow-up (2026-05-01):** Apply Tier 1 fixes from `.planning/AUDIT-2026-05-01-pipeline-hardening.md` — 5 critical + 3 high findings, ~170 LoC, 8 atomic commits. Covers: MEMO_DEBUG secret leak, cron API key env, EmbeddingsStore atomic save, save_memo O_EXCL race, Stage 2 claim marker, daily-log flock, prompt injection sandwich, cron VAULT_PATH allowlist. User asked: "in next session ask 'что у нас надо сделать' → tell me about audit follow-up". Estimated 2-3 hours executor time. Resume via `/gsd-quick Apply Tier 1 audit fixes from .planning/AUDIT-2026-05-01-pipeline-hardening.md`.
+- **Audit Tier 2 + Tier 3:** Documented in same file. Tier 2 = ~250 LoC further hardening. Tier 3 = move `.memo/` out of vault (architectural).
 
 ### Blockers/Concerns
 
