@@ -205,8 +205,10 @@ def main():
     transcript_path = hook_input.get("transcript_path", "")
     session_id = hook_input.get("session_id", "unknown")
 
+    # Defense-in-depth: the hook (auto_memo_hook.sh) already gates on transcript
+    # existence and size >= 2048 bytes. We silently exit here in case auto_memo.py
+    # is invoked directly with a bad path. No log line — the hook owns gating telemetry.
     if not transcript_path or not os.path.exists(transcript_path):
-        memo_log(vault_path, f"Transcript not found: {transcript_path}", "auto-memo")
         sys.exit(0)
 
     memo_log(vault_path, f"Processing session {session_id[:12]}...", "auto-memo")
