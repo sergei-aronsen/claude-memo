@@ -27,6 +27,7 @@ from memo_utils import call_llm, index_memo_file, memo_log, parse_json_response,
 
 COMPILED_MARKER = "<!-- compiled -->"
 AUTO_PROCESSED_MARKER = "<!-- auto-processed"
+AUTO_PROCESSING_MARKER = "<!-- auto-processing"  # claim written BEFORE Stage 2 Haiku call
 
 
 def find_uncompiled_logs(vault_path: str, target_date: str = None) -> list[str]:
@@ -55,6 +56,10 @@ def find_uncompiled_logs(vault_path: str, target_date: str = None) -> list[str]:
             if COMPILED_MARKER in content:
                 continue
             if AUTO_PROCESSED_MARKER in content:
+                continue
+            # Stage 2 in flight (claim marker written before Haiku call).
+            # Don't race the inline hook; pick this log up tomorrow.
+            if AUTO_PROCESSING_MARKER in content:
                 continue
             if len(content) < 200:
                 continue

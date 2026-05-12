@@ -187,6 +187,30 @@ def _save_memo(memo: dict, vault_path: str, session_id: str) -> str | None:
     return save_memo(memo, vault_path, session_id=session_id, source="auto-memo")
 
 
+def _write_daily_log_marker(vault_path: str, marker: str) -> None:
+    """Append a marker line to today's daily log under fcntl lock.
+
+    Silently no-op if the daily log does not exist or any I/O fails —
+    markers are best-effort; the cron path tolerates missing markers
+    by re-reading content.
+    """
+    import fcntl
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    daily_log = os.path.join(vault_path, "daily-logs", f"{today}.md")
+    if not os.path.exists(daily_log):
+        return
+    try:
+        with open(daily_log, "a", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(marker)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
 def main():
     from memo_utils import index_memo_file, memo_log
 
@@ -219,32 +243,40 @@ def main():
         memo_log(vault_path, f"Session too short ({len(messages)} messages), skipping", "auto-memo")
         sys.exit(0)
 
-    # 2. Truncate and classify
+    # 2. Claim the daily log BEFORE the Haiku call.
+    # Closes the cron race: if SessionEnd happens at 17:59 and Haiku takes 30s,
+    # cron at 18:00 must not re-process the same content. Cron treats both
+    # `<!-- auto-processing` and `<!-- auto-processed` as already-claimed.
+    started_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    _write_daily_log_marker(
+        vault_path,
+        f"\n<!-- auto-processing session={session_id[:12]} started={started_at} -->\n",
+    )
+
+    # 3. Truncate and classify
     conversation = truncate_conversation(messages)
     memos = classify_and_extract(conversation, vault_path)
+
+    saved: list[str] = []
+    if memos:
+        for memo in memos:
+            filepath = _save_memo(memo, vault_path, session_id)
+            if filepath:
+                saved.append(filepath)
+                index_memo_file(filepath, vault_path)
+
+    # 4. Finalize the marker REGARDLESS of saved count.
+    # Empty-memo sessions must still flip the marker, otherwise the
+    # cron job at 18:00 will re-process them and double-bill Haiku
+    # (which may then extract memos Stage 2 deemed unworthy — contradictory output).
+    _write_daily_log_marker(
+        vault_path,
+        f"\n<!-- auto-processed session={session_id[:12]} memos={len(saved)} -->\n",
+    )
 
     if not memos:
         memo_log(vault_path, "No memo-worthy content found", "auto-memo")
         sys.exit(0)
-
-    # 3. Save each memo
-    saved = []
-    for memo in memos:
-        filepath = _save_memo(memo, vault_path, session_id)
-        if filepath:
-            saved.append(filepath)
-            index_memo_file(filepath, vault_path)
-
-    # 4. Mark today's daily log as auto-processed (prevents compile_logs duplication)
-    if saved:
-        today = datetime.now().strftime("%Y-%m-%d")
-        daily_log = os.path.join(vault_path, "daily-logs", f"{today}.md")
-        if os.path.exists(daily_log):
-            try:
-                with open(daily_log, "a", encoding="utf-8") as f:
-                    f.write(f"\n<!-- auto-processed session={session_id[:12]} -->\n")
-            except Exception:
-                pass
 
     saved_names = ", ".join(os.path.basename(f) for f in saved)
     memo_log(vault_path, f"Auto-saved {len(saved)} memo(s): {saved_names}", "auto-memo")
