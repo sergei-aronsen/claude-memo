@@ -133,12 +133,32 @@ DAILY LOG:
 
 
 def mark_as_compiled(log_path: str):
-    """Add compiled marker to a daily log."""
+    """Add compiled marker to a daily log under fcntl.LOCK_EX.
+
+    Concurrent SessionEnd / PreCompact hooks may be appending to the
+    same file. Without the lock, the marker line can interleave with
+    a mid-write entry from another writer, corrupting both.
+    """
+    import fcntl
+
+    body = f"\n{COMPILED_MARKER}\n"
     try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"\n{COMPILED_MARKER}\n")
-    except Exception:
+        fd = os.open(log_path, os.O_WRONLY | os.O_APPEND)
+    except OSError:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            os.write(fd, body.encode("utf-8"))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
         pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def main():

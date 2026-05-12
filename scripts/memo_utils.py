@@ -546,6 +546,66 @@ def resolve_vault_path(argv: list[str] | None = None) -> str:
     return vault_path
 
 
+# ─── Daily-log write (shared by save_raw_log, pre_compact_save, auto_memo, compile_logs) ───
+
+
+def daily_log_write(vault_path: str, body: str, header_if_new: str | None = None) -> str | None:
+    """Append `body` to today's daily-logs/YYYY-MM-DD.md under fcntl.LOCK_EX.
+
+    If the file does not exist yet and `header_if_new` is provided, the
+    header is emitted first so the file always opens with frontmatter.
+
+    The whole write happens under a single LOCK_EX so multi-window
+    SessionEnd / PreCompact hooks cannot interleave bytes within or
+    across lines. Returns the log file path on success, or None on
+    OSError (caller already logs / ignores).
+    """
+    import fcntl
+
+    logs_dir = os.path.join(vault_path, "daily-logs")
+    try:
+        os.makedirs(logs_dir, exist_ok=True)
+    except OSError:
+        return None
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_file = os.path.join(logs_dir, f"{today}.md")
+
+    try:
+        fd = os.open(log_file, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
+    except OSError:
+        return None
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            # We need to know whether the file is empty BEFORE appending,
+            # so the header is only emitted once even under contention.
+            file_was_empty = os.fstat(fd).st_size == 0
+            with os.fdopen(fd, "a", encoding="utf-8", closefd=True) as f:
+                fd_owned = False  # ownership transferred to fdopen
+                if file_was_empty and header_if_new:
+                    f.write(header_if_new)
+                f.write(body)
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            # If fdopen() already closed the fd, the flock unlock above
+            # may have failed silently; that's fine. The os.close in this
+            # branch only fires when fdopen never ran (e.g. raise before).
+            if 'fd_owned' not in dir() or fd_owned:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    except OSError:
+        return None
+
+    return log_file
+
+
 # ─── Logging ───
 
 

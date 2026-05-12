@@ -18,17 +18,25 @@ Why two stages:
 import json
 import os
 import sys
+from collections import deque
 from datetime import datetime
 
 
 def read_last_messages(transcript_path: str, max_messages: int = 30) -> list[dict]:
-    """Read the last N messages from a JSONL transcript."""
+    """Read the last N messages from a JSONL transcript.
+
+    Uses `collections.deque(maxlen=...)` so memory is O(maxlen) rather
+    than O(file size). Long Claude Code transcripts routinely hit
+    50-200 MB; the previous readlines() implementation materialized the
+    whole file into a Python list before slicing, risking the 1.5s
+    SessionEnd timeout on slow / Dropbox-backed disks.
+    """
     messages = []
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            tail = deque(f, maxlen=max_messages * 3)
 
-        for line in lines[-(max_messages * 3) :]:  # Read extra lines, filter
+        for line in tail:
             line = line.strip()
             if not line:
                 continue
@@ -49,49 +57,37 @@ def read_last_messages(transcript_path: str, max_messages: int = 30) -> list[dic
                     messages.append({"role": role, "content": content})
             except json.JSONDecodeError:
                 continue
-    except Exception:
+    except (OSError, UnicodeDecodeError):
         return []
     return messages[-max_messages:]
 
 
-def save_daily_log(messages: list[dict], vault_path: str, session_id: str):
-    """Append messages to today's daily log file."""
-    logs_dir = os.path.join(vault_path, "daily-logs")
-    os.makedirs(logs_dir, exist_ok=True)
+def save_daily_log(messages: list[dict], vault_path: str, session_id: str) -> str | None:
+    """Append messages to today's daily log under fcntl.LOCK_EX."""
+    sys.path.insert(0, os.path.dirname(__file__))
+    from memo_utils import daily_log_write
 
     today = datetime.now().strftime("%Y-%m-%d")
     timestamp = datetime.now().strftime("%H:%M:%S")
-    log_file = os.path.join(logs_dir, f"{today}.md")
+    header = f"---\ndate: {today}\ntype: daily-log\n---\n\n# Daily Log — {today}\n\n"
 
-    # Create file header if new
-    if not os.path.exists(log_file):
-        header = f"---\ndate: {today}\ntype: daily-log\n---\n\n# Daily Log — {today}\n\n"
-        with open(log_file, "w", encoding="utf-8") as f:
-            f.write(header)
-
-    # Append session log
-    entry = f"\n## Session {session_id[:8]} ({timestamp})\n\n"
+    entry_parts = [f"\n## Session {session_id[:8]} ({timestamp})\n\n"]
     for msg in messages:
         role = msg["role"].upper()
         content = msg["content"]
         # Truncate very long messages but keep enough for context
         if len(content) > 1500:
             content = content[:1500] + "\n\n*[truncated]*"
-        entry += f"**{role}:** {content}\n\n"
-    entry += "---\n"
+        entry_parts.append(f"**{role}:** {content}\n\n")
+    entry_parts.append("---\n")
 
-    try:
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(entry)
-        return log_file
-    except Exception:
-        return None
+    return daily_log_write(vault_path, "".join(entry_parts), header_if_new=header)
 
 
 def main():
     # Add scripts dir to path for memo_utils import
     sys.path.insert(0, os.path.dirname(__file__))
-    from memo_utils import resolve_vault_path
+    from memo_utils import memo_log, resolve_vault_path
 
     vault_path = resolve_vault_path(sys.argv)
 
@@ -124,13 +120,12 @@ def main():
 
     log_file = save_daily_log(messages, vault_path, session_id)
 
-    # Log what we did
     if log_file:
-        memo_log = os.path.join(vault_path, ".memo", "auto_memo.log")
-        os.makedirs(os.path.dirname(memo_log), exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(memo_log, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] Raw log saved: {os.path.basename(log_file)} ({len(messages)} messages)\n")
+        memo_log(
+            vault_path,
+            f"Raw log saved: {os.path.basename(log_file)} ({len(messages)} messages)",
+            "raw-log",
+        )
 
 
 if __name__ == "__main__":

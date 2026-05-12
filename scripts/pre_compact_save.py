@@ -17,7 +17,30 @@ No API calls — just dump messages to a raw log file.
 import json
 import os
 import sys
+from collections import deque
 from datetime import datetime
+
+
+# Threshold mirrors auto_memo_hook.sh — see that file for rationale.
+_MIN_TRANSCRIPT_BYTES = 2048
+
+
+def _log_precompact_error(message: str) -> None:
+    """Log a PreCompact failure to ~/.cache/memo/precompact.log.
+
+    sys.exit(1) without a log line makes a broken PreCompact hook
+    invisible to the user — Claude Code swallows hook stderr. The
+    cache location works even when the vault path is what's broken.
+    """
+    try:
+        log_dir = os.path.expanduser("~/.cache/memo")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "precompact.log")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {message}\n")
+    except OSError:
+        pass
 
 
 def main():
@@ -31,69 +54,83 @@ def main():
 
     # Add scripts dir to path for memo_utils import
     sys.path.insert(0, os.path.dirname(__file__))
-    from memo_utils import resolve_vault_path
+    from memo_utils import daily_log_write, resolve_vault_path
 
-    vault_path = resolve_vault_path(sys.argv)
-
-    logs_dir = os.path.join(vault_path, "daily-logs")
-    os.makedirs(logs_dir, exist_ok=True)
+    # Wrap resolve_vault_path so a missing MEMO_VAULT_PATH does not
+    # silently sys.exit(1) — Claude Code swallows hook stderr, so the
+    # user would have no idea PreCompact is broken. Log to the cache
+    # log path instead.
+    try:
+        vault_path = resolve_vault_path(sys.argv)
+    except SystemExit:
+        _log_precompact_error(
+            "resolve_vault_path failed — set MEMO_VAULT_PATH or pass --vault"
+        )
+        sys.exit(0)
 
     if not transcript_path or not os.path.exists(transcript_path):
         sys.exit(0)
 
-    # Read last 30 messages from transcript
+    # Defense-in-depth size gate (symmetric with save_raw_log.py and
+    # auto_memo_hook.sh). Subagent / phantom PreCompact events would
+    # otherwise execute the full transcript read on every fire.
+    try:
+        if os.path.getsize(transcript_path) < _MIN_TRANSCRIPT_BYTES:
+            sys.exit(0)
+    except OSError:
+        sys.exit(0)
+
+    # Read tail of transcript via deque — O(maxlen) memory, single-pass
+    # streaming, safe on 200 MB transcripts.
     messages = []
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        for line in lines[-60:]:  # Read more lines, filter to 30 messages
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                if isinstance(entry, dict):
-                    # Handle Claude Code nested format
-                    if "message" in entry and isinstance(entry["message"], dict):
-                        entry = entry["message"]
-                    role = entry.get("role", "")
-                    content = entry.get("content", "")
-                    if isinstance(content, list):
-                        content = " ".join(
-                            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-                        )
-                    if role in ("user", "assistant") and content and content.strip():
-                        messages.append({"role": role, "content": content[:2000]})
-            except json.JSONDecodeError:
-                continue
-    except Exception:
+            tail = deque(f, maxlen=60)
+    except (OSError, UnicodeDecodeError):
         sys.exit(0)
+
+    for line in tail:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        # Handle Claude Code nested format
+        if "message" in entry and isinstance(entry["message"], dict):
+            entry = entry["message"]
+        role = entry.get("role", "")
+        content = entry.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+            )
+        if role in ("user", "assistant") and content and content.strip():
+            messages.append({"role": role, "content": content[:2000]})
 
     if len(messages) < 3:
         sys.exit(0)
 
-    # Save as raw daily log
     today = datetime.now().strftime("%Y-%m-%d")
     timestamp = datetime.now().strftime("%H:%M:%S")
-    log_file = os.path.join(logs_dir, f"{today}.md")
+    header = f"---\ndate: {today}\ntype: daily-log\n---\n\n# Daily Log — {today}\n\n"
 
-    log_entry = f"\n## Pre-compact save ({timestamp}, session {session_id[:8]})\n\n"
+    parts = [f"\n## Pre-compact save ({timestamp}, session {session_id[:8]})\n\n"]
     for msg in messages[-30:]:
         role = msg["role"].upper()
         content = msg["content"]
-        if len(content) > 500:
-            content = content[:500] + "..."
-        log_entry += f"**{role}:** {content}\n\n"
+        # 1500 char truncation matches save_raw_log.py (was 500 — the
+        # "insurance for long sessions" rationale was being undermined
+        # by a tighter cap than the primary path).
+        if len(content) > 1500:
+            content = content[:1500] + "\n\n*[truncated]*"
+        parts.append(f"**{role}:** {content}\n\n")
+    parts.append("---\n")
 
-    log_entry += "---\n"
-
-    try:
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(log_entry)
-    except Exception:
-        pass
-
+    daily_log_write(vault_path, "".join(parts), header_if_new=header)
     sys.exit(0)
 
 

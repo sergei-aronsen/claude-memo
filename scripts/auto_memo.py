@@ -188,27 +188,19 @@ def _save_memo(memo: dict, vault_path: str, session_id: str) -> str | None:
 
 
 def _write_daily_log_marker(vault_path: str, marker: str) -> None:
-    """Append a marker line to today's daily log under fcntl lock.
+    """Append a marker line to today's daily log via shared helper.
 
-    Silently no-op if the daily log does not exist or any I/O fails —
-    markers are best-effort; the cron path tolerates missing markers
-    by re-reading content.
+    Marker is best-effort: if the file does not yet exist there's
+    nothing to claim (Stage 1 would create it just before Stage 2
+    runs detached, but if Stage 1 was skipped we silently no-op).
     """
-    import fcntl
-
     today = datetime.now().strftime("%Y-%m-%d")
     daily_log = os.path.join(vault_path, "daily-logs", f"{today}.md")
     if not os.path.exists(daily_log):
         return
-    try:
-        with open(daily_log, "a", encoding="utf-8") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.write(marker)
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except OSError:
-        pass
+    from memo_utils import daily_log_write
+
+    daily_log_write(vault_path, marker)
 
 
 def main():
