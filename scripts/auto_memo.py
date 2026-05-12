@@ -27,102 +27,148 @@ import sys
 from datetime import datetime
 
 
-def read_transcript(transcript_path: str) -> list[dict]:
+def _extract_entry_message(entry: dict) -> tuple[str, str]:
+    """Pull (role, content) from a single transcript entry."""
+    # Handle Claude Code nested format: {"type": "user", "message": {...}}
+    if "message" in entry and isinstance(entry["message"], dict):
+        entry = entry["message"]
+
+    role = entry.get("role", "")
+    content = entry.get("content", "")
+
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            if btype == "text":
+                text_parts.append(block.get("text", ""))
+            elif btype == "tool_use":
+                tool_name = block.get("name", "unknown_tool")
+                tool_input = json.dumps(block.get("input", {}))[:200]
+                text_parts.append(f"[Used tool: {tool_name}({tool_input})]")
+            elif btype == "tool_result":
+                result_content = block.get("content", "")
+                if isinstance(result_content, list):
+                    result_content = " ".join(
+                        b.get("text", "") for b in result_content if isinstance(b, dict)
+                    )
+                if result_content:
+                    text_parts.append(f"[Tool result: {str(result_content)[:200]}]")
+        content = "\n".join(text_parts)
+    elif isinstance(content, str):
+        pass
+    else:
+        content = str(content)[:500] if content else ""
+
+    return role, content
+
+
+def read_transcript(transcript_path: str, vault_path: str | None = None) -> list[dict]:
     """Read JSONL transcript and extract conversation messages.
 
-    Handles multiple transcript formats robustly:
-    - Standard {role, content} messages
-    - Content as list of typed blocks [{type: "text", text: "..."}]
-    - Tool use/result blocks (extracted as context)
-    - Unknown formats (logged, skipped gracefully)
+    Robust to:
+    - Standard JSONL ({role, content} per line)
+    - Multi-line pretty-printed JSON (single top-level object/array)
+    - Mid-line truncation (last partial line)
+    - Format changes (logged once, not silently swallowed)
     """
-    messages = []
-    unknown_formats = 0
+    messages: list[dict] = []
+    decode_failures = 0
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
-            for line_num, line in enumerate(f, 1):
+            for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
-                    # Not JSON — could be a log line or separator
+                    decode_failures += 1
+                    if decode_failures > 3 and not messages:
+                        # Likely not JSONL after all. Bail out of the
+                        # line-by-line loop and try whole-file parse below.
+                        break
                     continue
 
                 if not isinstance(entry, dict):
                     continue
-
-                # Handle Claude Code nested format: {"type": "user", "message": {"role": "user", "content": "..."}}
-                if "message" in entry and isinstance(entry["message"], dict):
-                    entry = entry["message"]
-
-                role = entry.get("role", "")
-                content = entry.get("content", "")
-
-                # Handle content as list of blocks
-                if isinstance(content, list):
-                    text_parts = []
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        btype = block.get("type", "")
-                        if btype == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif btype == "tool_use":
-                            # Include tool name for context
-                            tool_name = block.get("name", "unknown_tool")
-                            tool_input = json.dumps(block.get("input", {}))[:200]
-                            text_parts.append(f"[Used tool: {tool_name}({tool_input})]")
-                        elif btype == "tool_result":
-                            # Include truncated result
-                            result_content = block.get("content", "")
-                            if isinstance(result_content, list):
-                                result_content = " ".join(
-                                    b.get("text", "") for b in result_content if isinstance(b, dict)
-                                )
-                            if result_content:
-                                text_parts.append(f"[Tool result: {str(result_content)[:200]}]")
-                    content = "\n".join(text_parts)
-
-                # Handle content as string (simple format)
-                elif isinstance(content, str):
-                    pass  # Already a string
-                else:
-                    # Unknown content type
-                    content = str(content)[:500] if content else ""
-                    unknown_formats += 1
-
+                role, content = _extract_entry_message(entry)
                 if role in ("user", "assistant") and content and content.strip():
                     messages.append({"role": role, "content": content})
+    except (FileNotFoundError, PermissionError, IsADirectoryError):
+        return []
+    except (OSError, UnicodeDecodeError) as e:
+        if vault_path:
+            from memo_utils import memo_log
 
-    except FileNotFoundError:
-        return []
-    except Exception:
-        # Don't crash on any transcript format issue
-        if messages:
-            return messages  # Return what we got
-        return []
+            memo_log(vault_path, f"read_transcript I/O error: {e}", "auto-memo")
+        return messages
+
+    if messages:
+        return messages
+
+    # N-H-M: Empty result + decode failures > 3 → likely pretty-printed JSON.
+    # Try whole-file parse before giving up.
+    if decode_failures > 0:
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            if vault_path:
+                from memo_utils import memo_log
+
+                memo_log(
+                    vault_path,
+                    f"read_transcript: unknown format (decode_failures={decode_failures})",
+                    "auto-memo",
+                )
+            return []
+
+        # Best-effort walk: top-level array → entries; top-level dict
+        # with "messages"/"entries" key → entries.
+        candidates: list = []
+        if isinstance(obj, list):
+            candidates = obj
+        elif isinstance(obj, dict):
+            for k in ("messages", "entries", "history"):
+                if isinstance(obj.get(k), list):
+                    candidates = obj[k]
+                    break
+
+        for entry in candidates:
+            if isinstance(entry, dict):
+                role, content = _extract_entry_message(entry)
+                if role in ("user", "assistant") and content and content.strip():
+                    messages.append({"role": role, "content": content})
 
     return messages
 
 
 def truncate_conversation(messages: list[dict], max_chars: int = 15000) -> str:
-    """Build a truncated conversation string for the classifier."""
-    parts = []
+    """Build a truncated conversation string for the classifier.
+
+    M-6: iterates messages in REVERSE so the END of the session
+    (where decisions, conclusions, and final commits live) is kept
+    when the budget runs out. The previous implementation kept the
+    START — for long sessions, that meant the classifier saw
+    "please refactor" but never the resulting decisions.
+    """
+    parts: list[str] = []
     total = 0
-    for msg in messages:
+    for msg in reversed(messages):
         role = msg["role"].upper()
         content = msg["content"]
-        # Truncate individual messages
         if len(content) > 2000:
             content = content[:2000] + "... [truncated]"
         line = f"[{role}]: {content}"
         if total + len(line) > max_chars:
-            parts.append("... [conversation truncated for analysis]")
+            parts.append("... [earlier conversation truncated]")
             break
         parts.append(line)
         total += len(line)
+    parts.reverse()
     return "\n\n".join(parts)
 
 
@@ -170,8 +216,19 @@ TRANSCRIPT:
     from memo_utils import call_llm, memo_log, parse_json_response
 
     text = call_llm(prompt, max_tokens=4000)
-    if not text:
-        memo_log(vault_path, "API call failed or returned empty", "auto-memo")
+    if text is None:
+        # H-ROB-2: distinguish API failure from "no memo-worthy content".
+        # Previously both took the same code path and emitted the same log
+        # line; if Haiku had been broken for a week the user would not
+        # know. None now ONLY signals transport/auth/timeout failures.
+        memo_log(
+            vault_path,
+            "[ERROR] API call failed — check OPENROUTER_API_KEY / ANTHROPIC_API_KEY and network",
+            "auto-memo",
+        )
+        return []
+    if not text.strip():
+        memo_log(vault_path, "API returned empty response", "auto-memo")
         return []
 
     memos = parse_json_response(text)
@@ -230,7 +287,7 @@ def main():
     memo_log(vault_path, f"Processing session {session_id[:12]}...", "auto-memo")
 
     # 1. Read transcript
-    messages = read_transcript(transcript_path)
+    messages = read_transcript(transcript_path, vault_path=vault_path)
     if len(messages) < 4:
         memo_log(vault_path, f"Session too short ({len(messages)} messages), skipping", "auto-memo")
         sys.exit(0)
