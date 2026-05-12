@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/skills/memo-skill/scripts/session_context.py"
+            "command": "python3 ~/.claude/skills/memo-skill/scripts/session_context.py",
+            "timeout": 3
           }
         ]
       }
@@ -17,7 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/skills/memo-skill/scripts/auto_memo_hook.sh"
+            "command": "bash ~/.claude/skills/memo-skill/scripts/auto_memo_hook.sh",
+            "timeout": 10
           }
         ]
       }
@@ -28,7 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/skills/memo-skill/scripts/pre_compact_save.py"
+            "command": "python3 ~/.claude/skills/memo-skill/scripts/pre_compact_save.py",
+            "timeout": 5
           }
         ]
       }

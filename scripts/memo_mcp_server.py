@@ -73,6 +73,45 @@ def get_vault_path() -> str:
 VALID_MEMO_TYPES = {"decision", "pattern", "debug", "insight", "tool"}
 MAX_LIMIT = 100
 MAX_TITLE_LENGTH = 200
+MAX_QUESTION_LENGTH = 2000        # N-H-K: question size cap
+MAX_CONTENT_LENGTH = 50_000        # N-M-7: per-field size caps
+MAX_FIELD_LENGTH = 5_000
+MAX_TAGS = 50
+MAX_TAG_LENGTH = 100
+MAX_RESPONSE_BYTES = 64 * 1024     # M-10: cap response payloads sent to MCP client
+
+
+# N-H-K: per-process rate limit on memo_query (Haiku spend amplifier).
+# Sliding 60s window stored in-process; resets when the MCP server
+# restarts. Tunable via MEMO_QUERY_RATE_PER_MIN env var.
+_QUERY_RATE_PER_MIN = int(os.environ.get("MEMO_QUERY_RATE_PER_MIN", "30"))
+_query_times: list[float] = []
+
+
+def _check_query_rate() -> str | None:
+    """Return error string if rate limit exceeded, else None."""
+    import time
+
+    now = time.time()
+    # Drop entries older than 60s
+    while _query_times and _query_times[0] < now - 60:
+        _query_times.pop(0)
+    if len(_query_times) >= _QUERY_RATE_PER_MIN:
+        return (
+            f"memo_query rate limit: {_QUERY_RATE_PER_MIN} calls per minute. "
+            "Retry after ~30s, or set MEMO_QUERY_RATE_PER_MIN to raise the cap."
+        )
+    _query_times.append(now)
+    return None
+
+
+def _truncate_response(text: str) -> str:
+    """Cap MCP responses to MAX_RESPONSE_BYTES (M-10)."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= MAX_RESPONSE_BYTES:
+        return text
+    cut = encoded[:MAX_RESPONSE_BYTES].decode("utf-8", errors="ignore")
+    return cut + "\n\n... [response truncated to fit MCP transport]"
 
 
 @mcp.tool()
@@ -93,12 +132,15 @@ def memo_search(query: str, limit: int = 10) -> str:
     results = search_vault(query, vault, limit=limit, threshold=0.3)
 
     if not results:
-        return "No results found. Try different search terms or check /memo stats."
+        return "No results found. Try different search terms or call memo_stats() to verify the vault has content."
 
     lines = [f"Found {len(results)} result(s):\n"]
     for r in results:
         score = f"{r['score']:.2f}"
-        tags = ", ".join(json.loads(r.get("tags", "[]"))) if r.get("tags") else ""
+        try:
+            tags = ", ".join(json.loads(r.get("tags") or "[]"))
+        except (json.JSONDecodeError, TypeError):
+            tags = ""
         lines.append(f"- **{r['title']}** (score: {score})")
         lines.append(f"  Path: {r['filepath']}")
         if r.get("project"):
@@ -110,23 +152,31 @@ def memo_search(query: str, limit: int = 10) -> str:
             lines.append(f"  {snippet}...")
         lines.append("")
 
-    return "\n".join(lines)
+    return _truncate_response("\n".join(lines))
 
 
 @mcp.tool()
 def memo_query(question: str) -> str:
     """Ask a question and get an AI-synthesized answer from the vault.
 
-    Uses semantic search to find relevant notes, then Claude Haiku
-    synthesizes a direct answer. Cost: ~$0.001 per query.
+    Uses semantic search to find relevant notes, then an LLM synthesizes
+    a direct answer. Cost: ~$0.001 per query. Rate-limited per process.
 
     Args:
         question: Natural language question about past work.
     """
     from memo_engine import query_vault
 
+    # N-H-K: input size cap + rate limit.
+    if len(question) > MAX_QUESTION_LENGTH:
+        return f"Question too long ({len(question)} chars, max {MAX_QUESTION_LENGTH}). Break into smaller queries."
+
+    rate_err = _check_query_rate()
+    if rate_err:
+        return rate_err
+
     vault = get_vault_path()
-    return query_vault(question, vault)
+    return _truncate_response(query_vault(question, vault))
 
 
 @mcp.tool()
@@ -161,9 +211,29 @@ def memo_save(
 
     vault = get_vault_path()
 
-    # Validate inputs
+    # N-M-7: per-field size caps. Without these, a malicious or buggy
+    # MCP client can hand a 50MB body that explodes the indexer
+    # (compute_file_hash, embedding, FTS insert) and inflates the vault
+    # with garbage notes.
+    if len(content) > MAX_CONTENT_LENGTH:
+        return f"Content too long ({len(content)} chars, max {MAX_CONTENT_LENGTH})."
+    for name, val in (("context", context), ("alternatives", alternatives), ("consequences", consequences)):
+        if val is not None and len(val) > MAX_FIELD_LENGTH:
+            return f"{name} too long ({len(val)} chars, max {MAX_FIELD_LENGTH})."
+    if tags is not None:
+        if len(tags) > MAX_TAGS:
+            return f"Too many tags ({len(tags)}, max {MAX_TAGS})."
+        if any(len(t) > MAX_TAG_LENGTH for t in tags):
+            return f"Tag too long (max {MAX_TAG_LENGTH} chars per tag)."
+    if aliases is not None:
+        if len(aliases) > MAX_TAGS:
+            return f"Too many aliases ({len(aliases)}, max {MAX_TAGS})."
+
+    # N-M-21: reject unknown memo_type explicitly instead of silently
+    # coercing to "insight" (caller may have made a typo and would
+    # never notice the note landed under the wrong folder).
     if memo_type not in VALID_MEMO_TYPES:
-        memo_type = "insight"
+        return f"Invalid memo_type '{memo_type}'. Must be one of: {', '.join(sorted(VALID_MEMO_TYPES))}."
     if len(title) > MAX_TITLE_LENGTH:
         title = title[:MAX_TITLE_LENGTH]
 
@@ -279,9 +349,15 @@ def memo_trace(concept: str, limit: int = 10) -> str:
 
     for r in results[:limit]:
         filepath = os.path.join(vault, r["filepath"])
-        # Path containment check
-        resolved = os.path.realpath(filepath)
-        if not resolved.startswith(os.path.realpath(vault) + os.sep):
+        # Path containment via commonpath (N-L-4). Cleaner semantics than
+        # startswith — does the right thing for trailing-slash variants
+        # and symlinks resolved on both sides.
+        try:
+            vault_real = os.path.realpath(vault)
+            resolved = os.path.realpath(filepath)
+            if os.path.commonpath([vault_real, resolved]) != vault_real:
+                continue
+        except (ValueError, OSError):
             continue
         try:
             with open(filepath, "r", encoding="utf-8") as f:
@@ -293,7 +369,7 @@ def memo_trace(concept: str, limit: int = 10) -> str:
             snippet = body[:300].replace("\n", " ").strip()
             if len(body) > 300:
                 snippet += "..."
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             snippet = "(could not read file)"
 
         date = r.get("created", "unknown")
@@ -305,7 +381,7 @@ def memo_trace(concept: str, limit: int = 10) -> str:
 
     lines.append(f"→ {len(results)} notes found. Showing {min(limit, len(results))} in chronological order.")
 
-    return "\n".join(lines)
+    return _truncate_response("\n".join(lines))
 
 
 @mcp.tool()
