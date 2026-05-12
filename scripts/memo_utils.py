@@ -372,13 +372,26 @@ def save_memo(
     folder_path = os.path.join(vault_path, folder)
     os.makedirs(folder_path, exist_ok=True)
 
-    # Unique filename
+    # Unique filename — open with O_CREAT|O_EXCL atomically so two
+    # concurrent SessionEnd hooks on the same topic at the same second
+    # cannot both observe a missing file and then race to open(..., "w").
+    # The previous `while os.path.exists` + later open() was TOCTOU:
+    # both writers passed the check, both wrote, second overwrote first.
     filename = f"{today}-{slug}.md"
     filepath = os.path.join(folder_path, filename)
     counter = 1
-    while os.path.exists(filepath):
-        filepath = os.path.join(folder_path, f"{today}-{slug}-{counter}.md")
-        counter += 1
+    fd: int | None = None
+    while True:
+        try:
+            fd = os.open(filepath, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            break
+        except FileExistsError:
+            filepath = os.path.join(folder_path, f"{today}-{slug}-{counter}.md")
+            counter += 1
+            if counter > 1000:
+                # Defensive: should never happen but bail rather than spin
+                memo_log(vault_path, f"save_memo: counter exhausted for slug={slug}", "error")
+                return None
 
     # Build frontmatter
     tags = memo.get("tags", [])
@@ -432,20 +445,40 @@ def save_memo(
         sections.append("## Related\n\n*(auto-generated, review and add links)*\n")
 
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None  # ownership transferred to fdopen
             f.write("\n".join(sections))
 
         # Append to INDEX.md (with month header for rotation)
         append_to_index(vault_path, filepath, title, source)
 
         return filepath
-    except Exception as e:
+    except OSError as e:
         memo_log(vault_path, f"save_memo failed: {e}", "error")
+        # If the file was created but the write failed, attempt to remove
+        # it so a retry doesn't trip the O_EXCL guard on the next call.
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
         return None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def append_to_index(vault_path: str, filepath: str, title: str, source: str):
-    """Append entry to INDEX.md with monthly sections."""
+    """Append entry to INDEX.md with monthly sections.
+
+    Acquires fcntl.LOCK_EX on the index file so concurrent SessionEnd /
+    auto-compile writers cannot interleave bytes mid-line or both insert
+    the same monthly header.
+    """
+    import fcntl
+
     index_path = os.path.join(vault_path, "INDEX.md")
     today = datetime.now().strftime("%Y-%m-%d")
     month = datetime.now().strftime("%Y-%m")
@@ -455,20 +488,27 @@ def append_to_index(vault_path: str, filepath: str, title: str, source: str):
     month_header = f"\n## {month}\n"
     entry = f"- [{today}] [[{link}]] — {title} *({source})*\n"
 
-    # Check if month header exists, add if not
     try:
-        existing = ""
-        if os.path.exists(index_path):
-            with open(index_path, "r", encoding="utf-8") as f:
+        # Open in r+/a hybrid: create if missing, take exclusive lock,
+        # then read full content under the lock to decide whether to
+        # emit the month header.
+        fd = os.open(index_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with os.fdopen(fd, "r+", encoding="utf-8", closefd=True) as f:
                 existing = f.read()
-
-        if month_header.strip() not in existing:
-            with open(index_path, "a", encoding="utf-8") as f:
-                f.write(month_header)
-
-        with open(index_path, "a", encoding="utf-8") as f:
-            f.write(entry)
-    except Exception as e:
+                # Pointer is at EOF after read — append directly.
+                if month_header.strip() not in existing:
+                    f.write(month_header)
+                f.write(entry)
+                fd = None  # ownership transferred to fdopen
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    except OSError as e:
         memo_log(vault_path, f"append_to_index failed: {e}", "error")
 
 
