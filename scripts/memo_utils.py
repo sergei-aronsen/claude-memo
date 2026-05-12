@@ -215,16 +215,20 @@ def call_llm(prompt: str, max_tokens: int = 4000, system: str | None = None) -> 
     if not api_key:
         return None
 
-    # Try primary model
+    # Try primary model. Distinguish None (transport / parse failure —
+    # retry on fallback) from "" (legitimate empty completion — return
+    # directly, don't double-bill). The old `if result:` truthiness
+    # check retried on every empty string, doubling Haiku spend on
+    # any "no memo-worthy content" session.
     result = _call_model(prompt, max_tokens, system, config, config["model"])
-    if result:
+    if result is not None:
         return result
 
     # Primary failed — try fallback
     fallback = config.get("fallback_model")
     if fallback and fallback != config["model"]:
         result = _call_model(prompt, max_tokens, system, config, fallback)
-        if result:
+        if result is not None:
             return result
 
     return None
@@ -239,8 +243,18 @@ def _call_model(prompt: str, max_tokens: int, system: str | None, config: dict[s
         return _call_openai_compat(prompt, max_tokens, system, cfg)
 
 
+# User-Agent for outgoing HTTP. Per the global security rules, the
+# default `Python-urllib/3.x` UA is a known fingerprint that some
+# providers and corporate proxies block or rate-limit. A clearly-
+# identified tool UA is the standard for API clients.
+_USER_AGENT = "claude-memo/1.0 (+https://github.com/sergei-aronsen/claude-memo)"
+
+
 def _call_anthropic(prompt: str, max_tokens: int, system: str | None, config: dict[str, str]) -> str | None:
-    """Call Anthropic API (Messages format)."""
+    """Call Anthropic API (Messages format). Returns the text on success
+    (possibly empty string for legitimate "nothing to say" completions),
+    or None on transport/auth/parse failure.
+    """
     body = {
         "model": config["model"],
         "max_tokens": max_tokens,
@@ -256,6 +270,7 @@ def _call_anthropic(prompt: str, max_tokens: int, system: str | None, config: di
             "Content-Type": "application/json",
             "x-api-key": config["api_key"],
             "anthropic-version": "2023-06-01",
+            "User-Agent": _USER_AGENT,
         },
         method="POST",
     )
@@ -263,20 +278,22 @@ def _call_anthropic(prompt: str, max_tokens: int, system: str | None, config: di
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            content = result.get("content", [])
-            if isinstance(content, list) and len(content) > 0:
-                return content[0].get("text", "")
-            return None
-    except Exception as e:
-        # Log to stderr for hook scripts; don't crash
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
         import sys
 
         print(f"[memo] Anthropic API call failed: {e}", file=sys.stderr)
         return None
 
+    content = result.get("content", [])
+    if isinstance(content, list) and len(content) > 0:
+        return content[0].get("text", "")
+    return ""  # API succeeded but had no content blocks — legitimate empty, not failure
+
 
 def _call_openai_compat(prompt: str, max_tokens: int, system: str | None, config: dict[str, str]) -> str | None:
-    """Call OpenAI-compatible API (OpenRouter, OpenAI, etc.)."""
+    """Call OpenAI-compatible API (OpenRouter, OpenAI, etc.).
+    Returns text on success (possibly empty), None on transport failure.
+    """
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -294,6 +311,7 @@ def _call_openai_compat(prompt: str, max_tokens: int, system: str | None, config
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {config['api_key']}",
+            "User-Agent": _USER_AGENT,
         },
         method="POST",
     )
@@ -301,15 +319,16 @@ def _call_openai_compat(prompt: str, max_tokens: int, system: str | None, config
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            choices = result.get("choices", [])
-            if choices and len(choices) > 0:
-                return choices[0].get("message", {}).get("content", "")
-            return None
-    except Exception as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
         import sys
 
         print(f"[memo] OpenAI-compat API call failed: {e}", file=sys.stderr)
         return None
+
+    choices = result.get("choices", [])
+    if choices and len(choices) > 0:
+        return choices[0].get("message", {}).get("content", "")
+    return ""
 
 
 # Backward-compatible alias

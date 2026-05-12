@@ -1,7 +1,16 @@
-# Core dependencies (ranges must match pyproject.toml)
-sentence-transformers>=3.0,<4   # multilingual-e5-large embeddings
-numpy>=1.26,<3                  # embedding storage and similarity search
-PyYAML>=6.0                     # frontmatter parsing (safe fallback without it)
+# Generated to mirror pyproject.toml [project.dependencies].
+# To regenerate after editing pyproject.toml:
+#   uv pip compile pyproject.toml -o requirements.txt
+# Or install directly without this file:
+#   pip install -e .            # core only
+#   pip install -e ".[mcp]"     # core + MCP server
+#   pip install -e ".[dev]"     # core + dev tools
 
-# MCP Server (optional — only needed if using memo_mcp_server.py)
-mcp[cli]>=1.0                   # Model Context Protocol SDK
+# Core dependencies (ranges must match pyproject.toml)
+sentence-transformers>=3.0,<3.5   # multilingual-e5-large embeddings
+numpy>=1.26,<3                    # embedding storage and similarity search
+PyYAML>=6.0                       # frontmatter parsing (safe fallback without it)
+
+# MCP server is OPTIONAL — install via `pip install -e ".[mcp]"`.
+# Listed here as a comment only, to keep requirements.txt minimal:
+# mcp[cli]>=1.0

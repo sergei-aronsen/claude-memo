@@ -170,16 +170,44 @@ for use across all projects and Claude Code sessions.
 EOF
 echo "  ✓ Welcome note"
 
-# Add to index
-echo "- [${TODAY}] [[insights/${TODAY}-vault-initialized]] — Vault initialized" >> "$VAULT_PATH/INDEX.md"
+# Add to index. Use Python so we share the same fcntl pattern as the
+# rest of the pipeline (memo_utils.daily_log_write etc.) — keeps INDEX.md
+# safe from concurrent re-runs of init_vault during cron compile_logs.
+python3 - "$VAULT_PATH" "${TODAY}" <<'PY' || echo "  ⚠ INDEX.md append failed"
+import fcntl, os, sys
+vault, today = sys.argv[1], sys.argv[2]
+line = f"- [{today}] [[insights/{today}-vault-initialized]] — Vault initialized\n"
+path = os.path.join(vault, "INDEX.md")
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    os.write(fd, line.encode("utf-8"))
+finally:
+    try: fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError: pass
+    os.close(fd)
+PY
 fi
 
 # Initialize git if not already
 if [ ! -d "$VAULT_PATH/.git" ]; then
-    cd "$VAULT_PATH"
-    git init -q
-    git add -A
-    git commit -q -m "Initialize memo-vault vault"
+    (
+        cd "$VAULT_PATH"
+        git init -q
+
+        # Don't abort the whole init on missing global user.name/email
+        # (a fresh macOS without git ever used has them unset, which
+        # aborts `git commit` under `set -e`). Pass per-command identity
+        # when global config is missing.
+        GIT_NAME=$(git config --get user.name 2>/dev/null || echo "")
+        GIT_EMAIL=$(git config --get user.email 2>/dev/null || echo "")
+        git add -A
+        if [ -z "$GIT_NAME" ] || [ -z "$GIT_EMAIL" ]; then
+            git -c user.name="memo-vault" -c user.email="memo@localhost" commit -q -m "Initialize memo-vault vault"
+        else
+            git commit -q -m "Initialize memo-vault vault"
+        fi
+    )
     echo "  ✓ Git repository initialized"
 fi
 
