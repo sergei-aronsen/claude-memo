@@ -14,3 +14,12 @@ build/
 
 # GSD planning artifacts (internal development)
 .planning/
+
+# Test/coverage artifacts
+.coverage
+.pytest_cache/
+coverage.xml
+htmlcov/
+
+# Serena MCP scratch
+.serena/

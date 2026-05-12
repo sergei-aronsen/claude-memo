@@ -40,3 +40,22 @@ mypy_path = "scripts"
 ignore_missing_imports = true
 warn_return_any = false
 warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests that touch the real embedding model (skipped by default; opt in with -m slow)",
+]
+
+[tool.coverage.run]
+source = ["scripts"]
+omit = ["scripts/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

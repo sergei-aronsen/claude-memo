@@ -33,7 +33,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install dev tools
-        run: pip install ruff mypy bandit==1.9.4 pip-audit
+        run: pip install ruff mypy bandit==1.9.4 pip-audit pytest pytest-cov
 
       - name: Lint (ruff)
         run: ruff check scripts/
@@ -49,3 +49,14 @@ jobs:
 
       - name: Dependency audit
         run: pip-audit -r requirements.txt
+
+      - name: Unit tests
+        run: pytest tests/ --cov=scripts --cov-report=xml --cov-report=term
+
+      - name: Upload coverage
+        if: ${{ matrix.python-version == '3.12' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
