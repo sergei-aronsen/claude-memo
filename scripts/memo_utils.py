@@ -481,7 +481,7 @@ def resolve_vault_path(argv: list[str] | None = None) -> str:
     Priority: MEMO_VAULT_PATH env > --vault CLI arg > ~/memo-vault default.
     Exits with error if no vault found.
     """
-    vault_path = os.environ.get("MEMO_VAULT_PATH", "")
+    vault_path = os.path.expanduser(os.environ.get("MEMO_VAULT_PATH", ""))
 
     if not vault_path and argv:
         for i, arg in enumerate(argv):
