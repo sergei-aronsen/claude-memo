@@ -17,6 +17,7 @@ Cost: ~$0.005-0.02 per day (Haiku batch on all daily logs).
 
 import argparse
 import os
+import re
 import sys
 
 # Add scripts dir to path for memo_utils import
@@ -64,8 +65,16 @@ def find_uncompiled_logs(vault_path: str, target_date: str = None) -> list[str]:
     return uncompiled
 
 
-def compile_log_to_memos(log_path: str, vault_path: str) -> list[dict]:
-    """Send a daily log to Haiku for structured extraction."""
+def compile_log_to_memos(log_path: str, vault_path: str) -> list[dict] | None:
+    """Send a daily log to Haiku for structured extraction.
+
+    Returns:
+        list[dict] — extracted memos (possibly empty if no memo-worthy content)
+        None       — API call failed (missing key, timeout, error)
+
+    The caller MUST distinguish None from [] so it does not mark the log
+    as compiled when the API actually failed.
+    """
     with open(log_path, "r", encoding="utf-8") as f:
         content = f.read()
 
@@ -111,8 +120,8 @@ DAILY LOG:
 {content}"""
 
     text = call_llm(prompt, max_tokens=8000)
-    if not text:
-        return []
+    if text is None:
+        return None  # API failure — caller should NOT mark compiled
 
     memos = parse_json_response(text)
     return memos if isinstance(memos, list) else []
@@ -133,6 +142,10 @@ def main():
     parser.add_argument("--date", default=None, help="Specific date to compile (YYYY-MM-DD)")
     args = parser.parse_args()
 
+    if args.date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
+        print(f"Invalid --date '{args.date}': must be YYYY-MM-DD", file=sys.stderr)
+        sys.exit(2)
+
     vault_path = os.path.expanduser(args.vault)
 
     def log(msg):
@@ -147,27 +160,52 @@ def main():
     log(f"Found {len(uncompiled)} uncompiled log(s).")
 
     total_saved = 0
+    api_failures = 0
+    save_failures_total = 0
     for lp in uncompiled:
         log_name = os.path.basename(lp)
         log(f"Compiling {log_name}...")
 
         memos = compile_log_to_memos(lp, vault_path)
+
+        if memos is None:
+            api_failures += 1
+            log(f"  [ERROR] API call failed for {log_name} — not marking compiled, will retry")
+            continue
+
         if not memos:
             log(f"  No memo-worthy content in {log_name}")
             mark_as_compiled(lp)
             continue
 
+        save_failures = 0
         for memo in memos:
             filepath = save_memo(memo, vault_path, source="auto-compile")
             if filepath:
                 index_memo_file(filepath, vault_path)
                 total_saved += 1
                 log(f"  Saved: {os.path.basename(filepath)}")
+            else:
+                save_failures += 1
+                log(f"  [ERROR] save_memo failed: {memo.get('title', '?')[:60]}")
 
-        mark_as_compiled(lp)
-        log(f"  Compiled {log_name}: {len(memos)} article(s)")
+        if save_failures == 0:
+            mark_as_compiled(lp)
+            log(f"  Compiled {log_name}: {len(memos)} article(s)")
+        else:
+            save_failures_total += save_failures
+            log(
+                f"  [WARN] {save_failures}/{len(memos)} memos failed for {log_name} — "
+                "not marking compiled, retry tomorrow"
+            )
 
-    log(f"Compile complete: {total_saved} article(s) from {len(uncompiled)} log(s).")
+    summary = (
+        f"Compile complete: {total_saved} article(s) from {len(uncompiled)} log(s). "
+        f"API failures: {api_failures}. Save failures: {save_failures_total}."
+    )
+    log(summary)
+    if api_failures or save_failures_total:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
