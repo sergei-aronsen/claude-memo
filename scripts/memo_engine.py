@@ -212,21 +212,78 @@ class EmbeddingsStore:
         self._load()
 
     def _load(self):
-        if os.path.exists(self.emb_path) and os.path.exists(self.map_path):
-            self.embeddings = np.load(self.emb_path)
-            with open(self.map_path) as f:
-                self.id_map = json.load(f)
+        # Both files must coexist. Either-but-not-both = torn write from a
+        # prior crash (CR-2 race) or partial-restore from backup. Refuse to
+        # silently overwrite the surviving file with an empty index — that
+        # would make the loss permanent. Caller can rebuild via
+        # `reindex --full` once notified.
+        emb_exists = os.path.exists(self.emb_path)
+        map_exists = os.path.exists(self.map_path)
+        if emb_exists != map_exists:
+            raise RuntimeError(
+                f"EmbeddingsStore inconsistent: emb={emb_exists} map={map_exists}. "
+                "Run `memo_engine.py reindex --vault {path} --full` to rebuild."
+            )
+
+        if emb_exists and map_exists:
+            # Acquire shared (read) lock on the vault lock file so we don't
+            # race a concurrent writer mid-save. Multiple concurrent readers
+            # can hold LOCK_SH simultaneously — only writers (LOCK_EX) block.
+            lock_path = get_lock_path(self.vault_path)
+            ensure_memo_dir(self.vault_path)
+            lock_fd = open(lock_path, "w")
+            try:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
+                self.embeddings = np.load(self.emb_path)
+                with open(self.map_path) as f:
+                    self.id_map = json.load(f)
+            finally:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                lock_fd.close()
+            if len(self.id_map) != (0 if self.embeddings is None else len(self.embeddings)):
+                raise RuntimeError(
+                    f"EmbeddingsStore length mismatch: "
+                    f"embeddings={0 if self.embeddings is None else len(self.embeddings)} "
+                    f"id_map={len(self.id_map)}. Run reindex --full."
+                )
         else:
             self.embeddings = None
             self.id_map = []
         self._id_index = {nid: i for i, nid in enumerate(self.id_map)}
 
     def _save(self):
+        """Atomically persist embeddings + id_map.
+
+        Writes both files to .tmp siblings then renames into place. POSIX
+        os.replace is atomic at the inode level, so a crash between the two
+        renames leaves the previous (consistent) pair untouched. Without
+        this, a SIGKILL between np.save and json.dump produces a permanent
+        mismatch — every subsequent search returns wrong note IDs.
+        """
         ensure_memo_dir(self.vault_path)
+        emb_tmp = self.emb_path + ".tmp"
+        map_tmp = self.map_path + ".tmp"
+
         if self.embeddings is not None:
-            np.save(self.emb_path, self.embeddings)
-        with open(self.map_path, "w") as f:
+            # np.save with a string path appends ".npy" — we want the exact
+            # filename we'll rename to, so pass an open file object.
+            with open(emb_tmp, "wb") as f:
+                np.save(f, self.embeddings)
+        elif os.path.exists(emb_tmp):
+            os.remove(emb_tmp)
+
+        with open(map_tmp, "w") as f:
             json.dump(self.id_map, f)
+
+        # Rename map first so a reader seeing both files agrees on length;
+        # but if embeddings is None we don't have an emb file to keep.
+        if self.embeddings is not None:
+            os.replace(emb_tmp, self.emb_path)
+        else:
+            # Clear out the old embeddings file alongside the empty map
+            if os.path.exists(self.emb_path):
+                os.remove(self.emb_path)
+        os.replace(map_tmp, self.map_path)
 
     def add(self, note_id: int, embedding: np.ndarray, defer_save: bool = False):
         """Add or update embedding for a note.
@@ -613,60 +670,84 @@ def reindex_vault(vault_path: str, full: bool = True):
     conn = init_db(vault_path)
     store = EmbeddingsStore(vault_path)
 
-    # Collect all current markdown files
-    current_files = {}  # rel_path → abs_path
-    for root, dirs, files in os.walk(vault_path):
-        dirs[:] = [d for d in dirs if d not in (".obsidian", ".memo", ".git", "daily-logs")]
-        for f in files:
-            if f.endswith(".md") and f != "INDEX.md":
-                abs_path = os.path.join(root, f)
-                rel_path = os.path.relpath(abs_path, vault_path)
-                current_files[rel_path] = abs_path
-
-    # For incremental: check what's already indexed
     indexed = 0
     skipped = 0
     removed = 0
+    errors: list[tuple[str, str]] = []
 
-    if not full:
-        # Get existing hashes from DB
-        existing = {}
-        for row in conn.execute("SELECT filepath, content_hash, id FROM notes").fetchall():
-            existing[row["filepath"]] = (row["content_hash"], row["id"])
+    try:
+        # Collect all current markdown files
+        current_files = {}  # rel_path → abs_path
+        for root, dirs, files in os.walk(vault_path):
+            dirs[:] = [d for d in dirs if d not in (".obsidian", ".memo", ".git", "daily-logs")]
+            for f in files:
+                if f.endswith(".md") and f != "INDEX.md":
+                    abs_path = os.path.join(root, f)
+                    rel_path = os.path.relpath(abs_path, vault_path)
+                    current_files[rel_path] = abs_path
 
-        # Remove entries for deleted files
-        for rel_path, (_, note_id) in existing.items():
-            if rel_path not in current_files:
-                conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
-                store.remove(note_id)
-                removed += 1
-        if removed:
-            conn.commit()
+        if not full:
+            # Get existing hashes from DB
+            existing = {}
+            for row in conn.execute("SELECT filepath, content_hash, id FROM notes").fetchall():
+                existing[row["filepath"]] = (row["content_hash"], row["id"])
 
-        # Index only changed/new files
-        for rel_path, abs_path in current_files.items():
-            file_hash = compute_file_hash(abs_path)
-            if rel_path in existing and existing[rel_path][0] == file_hash:
-                skipped += 1
-                continue
-            index_file(abs_path, vault_path, conn, store, defer_save=True)
-            indexed += 1
-            if indexed % 50 == 0:
-                print(f"  Indexed {indexed} notes...")
-    else:
-        # Full reindex — all files, batch mode
-        for rel_path, abs_path in current_files.items():
-            index_file(abs_path, vault_path, conn, store, defer_save=True)
-            indexed += 1
-            if indexed % 50 == 0:
-                print(f"  Indexed {indexed} notes...")
+            # Remove entries for deleted files
+            for rel_path, (_, note_id) in existing.items():
+                if rel_path not in current_files:
+                    conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+                    store.remove(note_id)
+                    removed += 1
+            if removed:
+                conn.commit()
 
-    # Single flush at the end (batch mode — no 500x file rewrites)
-    store.flush()
-    conn.close()
+            # Index only changed/new files. Per-file try/except so one bad
+            # file does not abort the whole batch (which would lose every
+            # deferred embedding accumulated so far).
+            for rel_path, abs_path in current_files.items():
+                try:
+                    file_hash = compute_file_hash(abs_path)
+                    if (
+                        rel_path in existing
+                        and existing[rel_path][0] == file_hash
+                        # Heal embedding drift: if hash matches but the
+                        # embedding is missing, fall through and re-embed.
+                        and existing[rel_path][1] in store._id_index
+                    ):
+                        skipped += 1
+                        continue
+                    index_file(abs_path, vault_path, conn, store, defer_save=True)
+                    indexed += 1
+                    if indexed % 50 == 0:
+                        print(f"  Indexed {indexed} notes...")
+                except Exception as e:
+                    errors.append((rel_path, str(e)))
+        else:
+            # Full reindex — all files, batch mode
+            for rel_path, abs_path in current_files.items():
+                try:
+                    index_file(abs_path, vault_path, conn, store, defer_save=True)
+                    indexed += 1
+                    if indexed % 50 == 0:
+                        print(f"  Indexed {indexed} notes...")
+                except Exception as e:
+                    errors.append((rel_path, str(e)))
+
+        # Single flush at the end (batch mode — no 500x file rewrites).
+        # MUST happen inside try so that a previous failure does not skip the
+        # flush and silently drop every deferred embedding.
+        store.flush()
+    finally:
+        conn.close()
 
     mode = "Full" if full else "Incremental"
     print(f"{mode} reindex complete: {indexed} indexed, {skipped} unchanged, {removed} removed.")
+    if errors:
+        print(f"  {len(errors)} file(s) failed:")
+        for rel_path, msg in errors[:10]:
+            print(f"    - {rel_path}: {msg}")
+        if len(errors) > 10:
+            print(f"    ... and {len(errors) - 10} more")
 
 
 # ─── Obsidian CLI integration (optional) ───
@@ -810,6 +891,13 @@ def lint_vault(vault_path: str) -> dict:
         "notes_without_aliases": [],
     }
 
+    try:
+        return _lint_vault_inner(vault_path, conn, issues)
+    finally:
+        conn.close()
+
+
+def _lint_vault_inner(vault_path: str, conn: sqlite3.Connection, issues: dict[str, Any]) -> dict:
     # Try Obsidian CLI for more accurate graph data
     obs_cli = ObsidianCLI(vault_path)
     obs_available = obs_cli.is_available()
@@ -946,8 +1034,6 @@ def lint_vault(vault_path: str) -> dict:
                     "title": row["title"],
                 }
             )
-
-    conn.close()
 
     # Summary
     total_issues = sum(len(v) for v in issues.values())
