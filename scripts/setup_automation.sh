@@ -45,7 +45,15 @@ if [ -z "$PYTHON3" ]; then
     echo "ERROR: python3 not found in PATH" >&2; exit 1
 fi
 
-MEMO_DIR="$HOME/.memo"
+# Resolve per-vault cache dir (~/.cache/memo/<hash>/) — keeps shims,
+# env, and logs per-vault so two vaults on the same machine don't
+# overwrite each other's cron config.
+MEMO_DIR="$(python3 -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from memo_utils import get_memo_dir
+print(get_memo_dir('$VAULT_PATH'))
+")"
 mkdir -p "$MEMO_DIR"
 chmod 700 "$MEMO_DIR"
 
@@ -167,10 +175,9 @@ install_cron_line() {
     fi
 }
 
-REINDEX_LOG="$VAULT_PATH/.memo/reindex.log"
-COMPILE_LOG="$VAULT_PATH/.memo/compile.log"
+REINDEX_LOG="$MEMO_DIR/reindex.log"
+COMPILE_LOG="$MEMO_DIR/compile.log"
 GIT_LOG="$MEMO_DIR/git-sync.log"
-mkdir -p "$(dirname "$REINDEX_LOG")"
 
 install_cron_line "$CRON_MARKER reindex" "*/30 * * * * $REINDEX_SHIM >> $REINDEX_LOG 2>&1"
 install_cron_line "$CRON_MARKER compile" "0 18 * * * $COMPILE_SHIM >> $COMPILE_LOG 2>&1"
@@ -223,8 +230,9 @@ echo "  Automation ready!"
 echo ""
 echo "  Cron jobs:     crontab -l"
 echo "  Cron env:      $CRON_ENV"
+echo "  Cache dir:     $MEMO_DIR"
 echo "  Reindex log:   $REINDEX_LOG"
 echo "  Compile log:   $COMPILE_LOG"
 echo "  Git sync log:  $GIT_LOG"
-echo "  Auto-memo log: $VAULT_PATH/.memo/auto_memo.log"
+echo "  Auto-memo log: $MEMO_DIR/auto_memo.log"
 echo "═══════════════════════════════════════════════"

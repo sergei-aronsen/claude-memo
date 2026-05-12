@@ -12,7 +12,11 @@ echo "  Path: $VAULT_PATH"
 echo "═══════════════════════════════════════════════"
 
 # Create directory structure — engineering zone
-mkdir -p "$VAULT_PATH"/{decisions,patterns,debug-logs,insights,tools,references,projects,daily-logs,.obsidian,.memo}
+# Note: `.memo/` is intentionally NOT created here. The per-machine
+# cache (SQLite index, embeddings, logs) lives at ~/.cache/memo/<hash>/
+# so Dropbox / iCloud do not sync sidecar files. Cache is created on
+# first run by memo_utils.get_memo_dir().
+mkdir -p "$VAULT_PATH"/{decisions,patterns,debug-logs,insights,tools,references,projects,daily-logs,.obsidian}
 
 # Create directory structure — personal zone
 mkdir -p "$VAULT_PATH"/{health,learning,ideas,life}
@@ -20,7 +24,10 @@ mkdir -p "$VAULT_PATH"/{health,learning,ideas,life}
 # .gitignore
 if [ ! -f "$VAULT_PATH/.gitignore" ]; then
 cat > "$VAULT_PATH/.gitignore" << 'EOF'
+# Legacy: pre-migration .memo/ used to live inside the vault.
+# Kept here so accidentally-restored old caches don't get committed.
 .memo/
+.memo.migrated-to-cache
 .obsidian/workspace.json
 .obsidian/workspace-mobile.json
 .trash/
@@ -146,7 +153,7 @@ for use across all projects and Claude Code sessions.
 
 - Every note is atomic (one idea per file) with YAML frontmatter
 - Notes link via \`[[wikilinks]]\` — Obsidian Graph View shows connections
-- \`.memo/index.db\` provides semantic search via embeddings
+- \`~/.cache/memo/<hash>/index.db\` (outside vault) provides semantic search via embeddings
 - Use \`/memo\` in Claude Code to save, \`/memo find\` to search
 - \`/memo reindex\` rebuilds the search index from scratch
 

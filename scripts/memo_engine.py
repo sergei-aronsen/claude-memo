@@ -40,7 +40,7 @@ from datetime import datetime
 from typing import Any
 
 import numpy as np
-from memo_utils import call_llm, parse_frontmatter
+from memo_utils import call_llm, get_memo_dir, parse_frontmatter
 
 # ─── Model config ───
 
@@ -73,25 +73,31 @@ def encode_query(text: str) -> np.ndarray:
     return model.encode(f"query: {text}")
 
 
+# All cache paths now resolve through memo_utils.get_memo_dir(), which
+# returns ~/.cache/memo/<hash>/ and auto-migrates legacy <vault>/.memo/
+# on first call. See memo_utils for the migration design rationale.
+
+
 def get_db_path(vault_path: str) -> str:
-    return os.path.join(vault_path, ".memo", "index.db")
+    return os.path.join(get_memo_dir(vault_path), "index.db")
 
 
 def get_embeddings_path(vault_path: str) -> str:
-    return os.path.join(vault_path, ".memo", "embeddings.npy")
+    return os.path.join(get_memo_dir(vault_path), "embeddings.npy")
 
 
 def get_id_map_path(vault_path: str) -> str:
-    return os.path.join(vault_path, ".memo", "id_map.json")
+    return os.path.join(get_memo_dir(vault_path), "id_map.json")
 
 
 def ensure_memo_dir(vault_path: str):
-    memo_dir = os.path.join(vault_path, ".memo")
-    os.makedirs(memo_dir, exist_ok=True)
+    # get_memo_dir already creates + chmods. Kept as a no-op wrapper
+    # so existing callers compile without churn.
+    get_memo_dir(vault_path)
 
 
 def get_lock_path(vault_path: str) -> str:
-    return os.path.join(vault_path, ".memo", "write.lock")
+    return os.path.join(get_memo_dir(vault_path), "write.lock")
 
 
 class VaultLock:

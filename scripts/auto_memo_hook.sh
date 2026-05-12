@@ -54,8 +54,24 @@ set -euo pipefail
 VAULT_PATH="${MEMO_VAULT_PATH:-$HOME/memo-vault}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Read stdin into temp file in vault's .memo dir (not /tmp — avoids sensitive data in shared dirs)
-MEMO_TMP_DIR="${VAULT_PATH}/.memo/tmp"
+# Per-vault cache lives outside the vault — keeps Dropbox / iCloud from
+# syncing SQLite WAL sidecars, lock files, and debug captures. The
+# Python helper resolves + auto-migrates legacy `<vault>/.memo/` on
+# first run.
+MEMO_DIR="$(python3 -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from memo_utils import get_memo_dir
+print(get_memo_dir('$VAULT_PATH'))
+" 2>/dev/null)"
+if [ -z "$MEMO_DIR" ]; then
+    # Fallback if Python or memo_utils unavailable. Keep working but
+    # warn — the orig path location stays consistent for this run.
+    echo "[memo] WARN: could not resolve memo cache dir; falling back to vault-local .memo/" >&2
+    MEMO_DIR="${VAULT_PATH}/.memo"
+fi
+
+MEMO_TMP_DIR="$MEMO_DIR/tmp"
 mkdir -p "$MEMO_TMP_DIR"
 chmod 700 "$MEMO_TMP_DIR" 2>/dev/null || true
 
@@ -112,9 +128,8 @@ fi
 #   - Stderr banner reminds the user the capture is on.
 
 if [ "${MEMO_DEBUG:-0}" = "1" ]; then
-    echo "[memo] MEMO_DEBUG=1 — appending payload to ${VAULT_PATH}/.memo/hook_payloads.jsonl (mode 0600, redacted, rotated at 10MB)" >&2
-
-    DEBUG_FILE="${VAULT_PATH}/.memo/hook_payloads.jsonl"
+    DEBUG_FILE="$MEMO_DIR/hook_payloads.jsonl"
+    echo "[memo] MEMO_DEBUG=1 — appending payload to $DEBUG_FILE (mode 0600, redacted, rotated at 10MB)" >&2
     mkdir -p "$(dirname "$DEBUG_FILE")"
 
     # Pre-create with restrictive mode if missing; correct mode on every run
@@ -235,7 +250,7 @@ LAUNCHER_SH
         "$SCRIPT_DIR/auto_memo.py" \
         "$VAULT_PATH" \
         "$TMPFILE_BG" \
-        "${VAULT_PATH}/.memo/auto_memo.log" \
+        "$MEMO_DIR/auto_memo.log" \
         "$LAUNCHER" \
         >/dev/null 2>&1 &
     disown

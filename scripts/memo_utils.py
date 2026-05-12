@@ -10,9 +10,11 @@ Single source of truth for:
 - Constants
 """
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -24,6 +26,144 @@ try:
     HAS_PYYAML = True
 except ImportError:
     HAS_PYYAML = False
+
+
+# ─── Per-vault cache directory ───
+#
+# Architectural Tier 3: the per-machine cache (SQLite index, embeddings,
+# logs, lock files, temp scratch) lives OUTSIDE the vault — in
+# `~/.cache/memo/<hash>/` keyed by sha256(realpath(vault)). The vault
+# itself only contains markdown (the actual knowledge) and a `.obsidian/`
+# app config — both of which DO belong in Dropbox sync.
+#
+# Why moved:
+#   - SQLite WAL sidecar files (.db-wal, .db-shm) are sync-hostile;
+#     Dropbox saw them mid-write and produced "Conflicted Copy" files
+#     that corrupted the database.
+#   - Two machines writing to the same `.memo/` over Dropbox raced past
+#     `fcntl.flock` (which is per-host) — no atomicity guarantee across
+#     hosts.
+#   - Logs grew unbounded inside a synced folder, wasting bandwidth.
+#   - `auto_memo.log` and `hook_payloads.jsonl` could carry session paths
+#     and tool inputs that should never leave the machine.
+#
+# Rebuilding the cache on a new machine takes one command:
+#   python3 scripts/memo_engine.py reindex --full --vault <path>
+# The vault itself is the source of truth.
+
+_LEGACY_MEMO_DIRNAME = ".memo"
+
+
+def _vault_hash(vault_path: str) -> str:
+    """Stable per-machine hash of the resolved vault path (16 hex chars)."""
+    real = os.path.realpath(vault_path)
+    return hashlib.sha256(real.encode("utf-8")).hexdigest()[:16]
+
+
+def get_memo_dir(vault_path: str) -> str:
+    """Return the per-vault cache directory (auto-creates + auto-migrates).
+
+    Path: ~/.cache/memo/<vault-hash>/
+
+    On first call for a given vault, if the legacy `<vault>/.memo/`
+    exists with contents and the cache dir is empty, the contents are
+    moved to the cache and a breadcrumb file is left in the vault
+    so future runs know the migration happened.
+    """
+    cache_root = os.path.expanduser("~/.cache/memo")
+    cache_dir = os.path.join(cache_root, _vault_hash(vault_path))
+
+    if not os.path.isdir(cache_dir):
+        os.makedirs(cache_dir, exist_ok=True)
+        try:
+            os.chmod(cache_dir, 0o700)
+        except OSError:
+            pass
+
+    _maybe_migrate_legacy_memo_dir(vault_path, cache_dir)
+
+    return cache_dir
+
+
+def _maybe_migrate_legacy_memo_dir(vault_path: str, cache_dir: str) -> None:
+    """One-shot migration: move contents of <vault>/.memo/ to cache_dir.
+
+    Idempotent. Only fires when:
+      - <vault>/.memo/ exists and has contents
+      - cache_dir is empty or only has files migration would produce
+      - no `.migrated-to-cache` breadcrumb exists in vault
+    """
+    legacy = os.path.join(vault_path, _LEGACY_MEMO_DIRNAME)
+    breadcrumb = os.path.join(vault_path, _LEGACY_MEMO_DIRNAME + ".migrated-to-cache")
+
+    if os.path.exists(breadcrumb):
+        return
+    if not os.path.isdir(legacy):
+        return
+    try:
+        legacy_contents = os.listdir(legacy)
+    except OSError:
+        return
+    if not legacy_contents:
+        return
+
+    cache_existing = set(os.listdir(cache_dir)) if os.path.isdir(cache_dir) else set()
+    # If the cache already has a real db, don't blindly overwrite — bail
+    # and let the user decide. (Defensive: should only happen if user
+    # manually populated both.)
+    if any(name in cache_existing for name in ("index.db", "embeddings.npy", "id_map.json")):
+        return
+
+    import sys
+
+    print(
+        f"[memo] migrating {legacy} → {cache_dir} (one-time architectural move)",
+        file=sys.stderr,
+    )
+
+    for name in legacy_contents:
+        src = os.path.join(legacy, name)
+        dst = os.path.join(cache_dir, name)
+        try:
+            if os.path.isdir(src):
+                # Merge directories rather than replace
+                if os.path.isdir(dst):
+                    for sub in os.listdir(src):
+                        try:
+                            shutil.move(os.path.join(src, sub), os.path.join(dst, sub))
+                        except (OSError, shutil.Error):
+                            pass
+                    try:
+                        os.rmdir(src)
+                    except OSError:
+                        pass
+                else:
+                    shutil.move(src, dst)
+            else:
+                shutil.move(src, dst)
+        except (OSError, shutil.Error) as e:
+            print(f"[memo] migrate skip {src}: {e}", file=sys.stderr)
+
+    # Leave breadcrumb so we don't try again, and so user knows what
+    # happened if they look in their vault.
+    try:
+        with open(breadcrumb, "w", encoding="utf-8") as f:
+            f.write(
+                "This vault used to have a `.memo/` directory inside it.\n"
+                f"Contents have been moved to: {cache_dir}\n"
+                "This file is a breadcrumb so the migration is not repeated.\n"
+                "Safe to delete this file once you have confirmed the cache works.\n"
+            )
+    except OSError:
+        pass
+
+    # If legacy dir is now empty, remove it. Don't force-remove if any
+    # files were left behind by a failed move.
+    try:
+        if not os.listdir(legacy):
+            os.rmdir(legacy)
+    except OSError:
+        pass
 
 
 # ─── YAML Frontmatter ───
@@ -629,15 +769,29 @@ def daily_log_write(vault_path: str, body: str, header_if_new: str | None = None
 
 
 def memo_log(vault_path: str, message: str, component: str = "memo"):
-    """Append timestamped message to .memo/auto_memo.log."""
-    log_path = os.path.join(vault_path, ".memo", "auto_memo.log")
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    """Append timestamped message to <cache>/auto_memo.log."""
+    import fcntl
+
+    log_path = os.path.join(get_memo_dir(vault_path), "auto_memo.log")
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] [{component}] {message}\n"
     try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] [{component}] {message}\n")
-    except Exception:
-        pass  # Cannot log a logging failure — silently ignore
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def index_memo_file(filepath: str, vault_path: str):

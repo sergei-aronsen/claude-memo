@@ -116,7 +116,10 @@ def load_project_context(vault_path: str, project_name: str) -> str | None:
          unbounded `%memo%` which collided with unrelated repos
          containing "memo" as substring.
     """
-    db_path = os.path.join(vault_path, ".memo", "index.db")
+    sys.path.insert(0, os.path.dirname(__file__))
+    from memo_utils import get_memo_dir
+
+    db_path = os.path.join(get_memo_dir(vault_path), "index.db")
     if not os.path.exists(db_path):
         return None
 
