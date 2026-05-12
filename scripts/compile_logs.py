@@ -23,7 +23,7 @@ import sys
 # Add scripts dir to path for memo_utils import
 sys.path.insert(0, os.path.dirname(__file__))
 
-from memo_utils import call_llm, index_memo_file, memo_log, parse_json_response, save_memo
+from memo_utils import call_llm, memo_log, parse_json_response, save_memo_and_index
 
 COMPILED_MARKER = "<!-- compiled -->"
 AUTO_PROCESSED_MARKER = "<!-- auto-processed"
@@ -205,9 +205,8 @@ def main():
 
         save_failures = 0
         for memo in memos:
-            filepath = save_memo(memo, vault_path, source="auto-compile")
+            filepath = save_memo_and_index(memo, vault_path, source="auto-compile")
             if filepath:
-                index_memo_file(filepath, vault_path)
                 total_saved += 1
                 log(f"  Saved: {os.path.basename(filepath)}")
             else:

@@ -232,25 +232,29 @@ class EmbeddingsStore:
             )
 
         if emb_exists and map_exists:
-            # Acquire shared (read) lock on the vault lock file so we don't
-            # race a concurrent writer mid-save. Multiple concurrent readers
-            # can hold LOCK_SH simultaneously — only writers (LOCK_EX) block.
-            lock_path = get_lock_path(self.vault_path)
-            ensure_memo_dir(self.vault_path)
-            lock_fd = open(lock_path, "w")
-            try:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
-                self.embeddings = np.load(self.emb_path)
-                with open(self.map_path) as f:
-                    self.id_map = json.load(f)
-            finally:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                lock_fd.close()
+            # Do NOT take LOCK_SH on the vault lock file here. The previous
+            # version did, intending to block readers while a writer mid-saved.
+            # But _save now uses atomic tmp+rename, AND every legitimate writer
+            # (save_memo_and_index, reindex_vault, the index-file CLI) already
+            # holds VaultLock LOCK_EX on this same file. Taking LOCK_SH from
+            # the same process self-deadlocks: BSD flock blocks the SH request
+            # against our own EX even though both come from the same PID
+            # (POSIX/Darwin flock semantics — see auto_memo_hook orphan).
+            #
+            # Race window without the lock: _save renames emb_tmp then map_tmp,
+            # so a reader can briefly observe emb of length N+1 and map of
+            # length N. The length check below detects exactly that and raises
+            # RuntimeError; the caller can retry or bail. Atomic-at-file level
+            # via os.replace already eliminates torn-write within either file.
+            self.embeddings = np.load(self.emb_path)
+            with open(self.map_path) as f:
+                self.id_map = json.load(f)
             if len(self.id_map) != (0 if self.embeddings is None else len(self.embeddings)):
                 raise RuntimeError(
                     f"EmbeddingsStore length mismatch: "
                     f"embeddings={0 if self.embeddings is None else len(self.embeddings)} "
-                    f"id_map={len(self.id_map)}. Run reindex --full."
+                    f"id_map={len(self.id_map)}. Either a concurrent writer is "
+                    "mid-_save (retry) or run `memo_engine.py reindex --full`."
                 )
         else:
             self.embeddings = None

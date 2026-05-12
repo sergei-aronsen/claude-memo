@@ -795,7 +795,12 @@ def memo_log(vault_path: str, message: str, component: str = "memo"):
 
 
 def index_memo_file(filepath: str, vault_path: str):
-    """Index a memo file in the search engine (direct call, no subprocess)."""
+    """Index a memo file in the search engine (direct call, no subprocess).
+
+    Used for retroactive indexing only — new writes should go through
+    save_memo_and_index() so the file-on-disk and SQLite row appear
+    under one lock.
+    """
     try:
         import sys
 
@@ -814,3 +819,51 @@ def index_memo_file(filepath: str, vault_path: str):
                 conn.close()
     except Exception as e:
         memo_log(vault_path, f"index_memo_file failed for {filepath}: {e}", "error")
+
+
+def save_memo_and_index(
+    memo: dict,
+    vault_path: str,
+    session_id: str = "manual",
+    source: str = "auto-memo",
+) -> str | None:
+    """Atomically save a memo and index it under a single VaultLock.
+
+    H-CONC-4: the previous pattern was `filepath = save_memo(...)` followed
+    by `index_memo_file(filepath, ...)`. Between those two calls the file
+    existed on disk but had no SQLite row — a reader scanning the
+    filesystem could miss the note in search results. This wrapper takes
+    VaultLock once, performs both writes, and releases. From a reader's
+    perspective the note appears in both stores atomically with respect
+    to other writers.
+
+    Returns filepath of saved note, or None on save failure. Indexing
+    failures are logged but do not unlink the note (the cron reindex
+    will pick it up on next pass).
+    """
+    import sys
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+
+    from memo_engine import EmbeddingsStore, VaultLock, index_file, init_db
+
+    with VaultLock(vault_path):
+        filepath = save_memo(memo, vault_path, session_id=session_id, source=source)
+        if not filepath:
+            return None
+        try:
+            conn = init_db(vault_path)
+            store = EmbeddingsStore(vault_path)
+            try:
+                index_file(filepath, vault_path, conn, store)
+            finally:
+                conn.close()
+        except Exception as e:
+            memo_log(
+                vault_path,
+                f"save_memo_and_index: indexing failed for {filepath}: {e}",
+                "error",
+            )
+        return filepath

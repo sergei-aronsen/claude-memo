@@ -238,10 +238,14 @@ TRANSCRIPT:
 
 
 def _save_memo(memo: dict, vault_path: str, session_id: str) -> str | None:
-    """Delegate to shared save_memo in memo_utils."""
-    from memo_utils import save_memo
+    """Delegate to shared save_memo_and_index in memo_utils.
 
-    return save_memo(memo, vault_path, session_id=session_id, source="auto-memo")
+    Atomic save+index under one VaultLock so a reader never sees the
+    note on disk without an SQLite row (H-CONC-4).
+    """
+    from memo_utils import save_memo_and_index
+
+    return save_memo_and_index(memo, vault_path, session_id=session_id, source="auto-memo")
 
 
 def _write_daily_log_marker(vault_path: str, marker: str) -> None:
@@ -261,7 +265,7 @@ def _write_daily_log_marker(vault_path: str, marker: str) -> None:
 
 
 def main():
-    from memo_utils import index_memo_file, memo_log
+    from memo_utils import memo_log
 
     parser = argparse.ArgumentParser(description="Auto-memo from Claude Code transcript")
     parser.add_argument("--vault", required=True, help="Path to vault root")
@@ -312,7 +316,6 @@ def main():
             filepath = _save_memo(memo, vault_path, session_id)
             if filepath:
                 saved.append(filepath)
-                index_memo_file(filepath, vault_path)
 
     # 4. Finalize the marker REGARDLESS of saved count.
     # Empty-memo sessions must still flip the marker, otherwise the

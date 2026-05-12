@@ -207,7 +207,7 @@ def memo_save(
         alternatives: What else was considered (for decisions).
         consequences: What this means going forward.
     """
-    from memo_utils import index_memo_file, save_memo
+    from memo_utils import save_memo_and_index
 
     vault = get_vault_path()
 
@@ -249,9 +249,8 @@ def memo_save(
         "consequences": consequences,
     }
 
-    filepath = save_memo(memo, vault, source="mcp")
+    filepath = save_memo_and_index(memo, vault, source="mcp")
     if filepath:
-        index_memo_file(filepath, vault)
         rel = os.path.relpath(filepath, vault)
         return f"Saved: {rel}\nTitle: {title}\nType: {memo_type}"
     return "Failed to save memo. Check vault path and permissions."
