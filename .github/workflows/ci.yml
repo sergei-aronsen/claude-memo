@@ -33,7 +33,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install dev tools
-        run: pip install ruff mypy bandit==1.9.4 pip-audit pytest pytest-cov
+        run: pip install ruff mypy types-PyYAML bandit==1.9.4 pip-audit pytest pytest-cov
 
       - name: Lint (ruff)
         run: ruff check scripts/

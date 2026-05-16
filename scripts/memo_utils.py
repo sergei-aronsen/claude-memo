@@ -21,7 +21,7 @@ from datetime import datetime
 
 # Try PyYAML first (preferred), fall back to basic parser
 try:
-    import yaml  # type: ignore[import-untyped]  # stubs optional: pip install types-PyYAML
+    import yaml  # PyYAML stubs optional; pyproject sets ignore_missing_imports
 
     HAS_PYYAML = True
 except ImportError:

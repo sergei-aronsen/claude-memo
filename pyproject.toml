@@ -19,6 +19,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.9",
     "mypy>=1.8",
+    "types-PyYAML>=6.0",
     "bandit>=1.8",
     "pip-audit>=2.7",
 ]
