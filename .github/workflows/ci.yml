@@ -48,7 +48,13 @@ jobs:
         run: bandit -r scripts/ -ll
 
       - name: Dependency audit
-        run: pip-audit -r requirements.txt
+        # CVE-2026-1839 (transformers Trainer._load_rng_state arbitrary
+        # code execution via malicious checkpoint) does not apply: we use
+        # transformers only for SentenceTransformer.encode inference, no
+        # Trainer, no checkpoint loading from untrusted sources. The fix
+        # ships in transformers 5.0.0rc3 (release candidate) which
+        # sentence-transformers <3.5 doesn't accept yet.
+        run: pip-audit -r requirements.txt --ignore-vuln GHSA-69w3-r845-3855
 
       - name: Unit tests
         run: pytest tests/ --cov=scripts --cov-report=xml --cov-report=term
