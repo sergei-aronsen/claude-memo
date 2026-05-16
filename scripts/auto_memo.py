@@ -51,9 +51,7 @@ def _extract_entry_message(entry: dict) -> tuple[str, str]:
             elif btype == "tool_result":
                 result_content = block.get("content", "")
                 if isinstance(result_content, list):
-                    result_content = " ".join(
-                        b.get("text", "") for b in result_content if isinstance(b, dict)
-                    )
+                    result_content = " ".join(b.get("text", "") for b in result_content if isinstance(b, dict))
                 if result_content:
                     text_parts.append(f"[Tool result: {str(result_content)[:200]}]")
         content = "\n".join(text_parts)

@@ -40,7 +40,7 @@ from datetime import datetime
 from typing import Any
 
 import numpy as np
-from memo_utils import call_llm, get_memo_dir, parse_frontmatter
+from memo_utils import call_llm, get_memo_dir, memo_log, parse_frontmatter
 
 # ─── Model config ───
 
@@ -306,7 +306,8 @@ class EmbeddingsStore:
 
         if note_id in self._id_index:
             idx = self._id_index[note_id]
-            assert self.embeddings is not None
+            if self.embeddings is None:
+                raise RuntimeError("embeddings matrix missing despite populated _id_index")
             self.embeddings[idx] = embedding
         else:
             if defer_save:
@@ -617,7 +618,7 @@ def find_duplicates(vault_path: str, threshold: float = 0.7):
         involved_ids = sorted({int(store.id_map[i]) for i in hit_i} | {int(store.id_map[j]) for j in hit_j})
         placeholders = ",".join("?" * len(involved_ids))
         rows = conn.execute(
-            f"SELECT id, filepath, title FROM notes WHERE id IN ({placeholders})",
+            f"SELECT id, filepath, title FROM notes WHERE id IN ({placeholders})",  # nosec B608
             involved_ids,
         ).fetchall()
         by_id = {row["id"]: row for row in rows}
@@ -996,9 +997,7 @@ def _lint_vault_inner(vault_path: str, conn: sqlite3.Connection, issues: dict[st
     # is O(N) instead of O(N^3) (was: triple-nested loop over notes ×
     # outgoing links × filepaths, with substring match that also produced
     # false-positive backlinks for short slugs).
-    no_ext_to_filepath: dict[str, str] = {
-        os.path.splitext(fp)[0]: fp for fp in all_filepaths
-    }
+    no_ext_to_filepath: dict[str, str] = {os.path.splitext(fp)[0]: fp for fp in all_filepaths}
 
     def _resolve_link(link: str) -> str | None:
         """Resolve a [[wikilink]] target to a vault filepath.
@@ -1089,8 +1088,8 @@ def _lint_vault_inner(vault_path: str, conn: sqlite3.Connection, issues: dict[st
                         content = fh.read()
                     if "<!-- compiled -->" not in content and len(content) > 200:
                         issues["uncompiled_logs"].append(f)
-                except Exception:
-                    pass
+                except OSError as e:
+                    memo_log(vault_path, f"lint_vault: skip unreadable log {fp}: {e}", "debug")
 
     # 6. Notes without tags
     for row in all_notes:
@@ -1184,8 +1183,7 @@ def query_vault(query: str, vault_path: str) -> str:
     # Now each note is wrapped in an <vault_note> envelope and a system
     # message tells the model the envelope contents are data, not commands.
     context = "\n\n".join(
-        f'<vault_note source="{p["filepath"]}" untrusted="true">\n{p["body"]}\n</vault_note>'
-        for p in context_parts
+        f'<vault_note source="{p["filepath"]}" untrusted="true">\n{p["body"]}\n</vault_note>' for p in context_parts
     )
 
     system = (

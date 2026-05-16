@@ -395,6 +395,12 @@ def _call_anthropic(prompt: str, max_tokens: int, system: str | None, config: di
     (possibly empty string for legitimate "nothing to say" completions),
     or None on transport/auth/parse failure.
     """
+    if not config["url"].startswith("https://"):
+        import sys
+
+        print(f"[memo] refusing non-https API URL: {config['url']!r}", file=sys.stderr)
+        return None
+
     body = {
         "model": config["model"],
         "max_tokens": max_tokens,
@@ -416,7 +422,7 @@ def _call_anthropic(prompt: str, max_tokens: int, system: str | None, config: di
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:  # nosec B310 — https scheme allowlisted above
             result = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
         import sys
@@ -434,6 +440,12 @@ def _call_openai_compat(prompt: str, max_tokens: int, system: str | None, config
     """Call OpenAI-compatible API (OpenRouter, OpenAI, etc.).
     Returns text on success (possibly empty), None on transport failure.
     """
+    if not config["url"].startswith("https://"):
+        import sys
+
+        print(f"[memo] refusing non-https API URL: {config['url']!r}", file=sys.stderr)
+        return None
+
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -457,7 +469,7 @@ def _call_openai_compat(prompt: str, max_tokens: int, system: str | None, config
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:  # nosec B310 — https scheme allowlisted above
             result = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
         import sys
@@ -652,6 +664,7 @@ def append_to_index(vault_path: str, filepath: str, title: str, source: str):
         # then read full content under the lock to decide whether to
         # emit the month header.
         fd = os.open(index_path, os.O_RDWR | os.O_CREAT, 0o644)
+        ownership_transferred = False
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             with os.fdopen(fd, "r+", encoding="utf-8", closefd=True) as f:
@@ -660,9 +673,9 @@ def append_to_index(vault_path: str, filepath: str, title: str, source: str):
                 if month_header.strip() not in existing:
                     f.write(month_header)
                 f.write(entry)
-                fd = None  # ownership transferred to fdopen
+                ownership_transferred = True  # fdopen now owns fd; do not double-close
         finally:
-            if fd is not None:
+            if not ownership_transferred:
                 try:
                     os.close(fd)
                 except OSError:
@@ -754,7 +767,7 @@ def daily_log_write(vault_path: str, body: str, header_if_new: str | None = None
             # If fdopen() already closed the fd, the flock unlock above
             # may have failed silently; that's fine. The os.close in this
             # branch only fires when fdopen never ran (e.g. raise before).
-            if 'fd_owned' not in dir() or fd_owned:
+            if "fd_owned" not in dir() or fd_owned:
                 try:
                     os.close(fd)
                 except OSError:

@@ -73,12 +73,12 @@ def get_vault_path() -> str:
 VALID_MEMO_TYPES = {"decision", "pattern", "debug", "insight", "tool"}
 MAX_LIMIT = 100
 MAX_TITLE_LENGTH = 200
-MAX_QUESTION_LENGTH = 2000        # N-H-K: question size cap
-MAX_CONTENT_LENGTH = 50_000        # N-M-7: per-field size caps
+MAX_QUESTION_LENGTH = 2000  # N-H-K: question size cap
+MAX_CONTENT_LENGTH = 50_000  # N-M-7: per-field size caps
 MAX_FIELD_LENGTH = 5_000
 MAX_TAGS = 50
 MAX_TAG_LENGTH = 100
-MAX_RESPONSE_BYTES = 64 * 1024     # M-10: cap response payloads sent to MCP client
+MAX_RESPONSE_BYTES = 64 * 1024  # M-10: cap response payloads sent to MCP client
 
 
 # N-H-K: per-process rate limit on memo_query (Haiku spend amplifier).

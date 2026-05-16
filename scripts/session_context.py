@@ -135,10 +135,12 @@ def load_project_context(vault_path: str, project_name: str) -> str | None:
         context_parts: list[str] = []
 
         def fetch(query_tail: str, args: tuple, limit: int):
-            sql = (
-                "SELECT filepath, title, body, created FROM notes WHERE "
+            # query_tail is composed from module-local literals; limit is explicitly
+            # cast through int() — both bandit B608 hits here are false positives.
+            sql = (  # nosec B608
+                "SELECT filepath, title, body, created FROM notes WHERE "  # nosec B608
                 + query_tail
-                + f" ORDER BY created DESC LIMIT {int(limit)}"
+                + f" ORDER BY created DESC LIMIT {int(limit)}"  # nosec B608
             )
             return conn.execute(sql, args).fetchall()
 

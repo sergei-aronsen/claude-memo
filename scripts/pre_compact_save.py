@@ -20,7 +20,6 @@ import sys
 from collections import deque
 from datetime import datetime
 
-
 # Threshold mirrors auto_memo_hook.sh — see that file for rationale.
 _MIN_TRANSCRIPT_BYTES = 2048
 
@@ -63,9 +62,7 @@ def main():
     try:
         vault_path = resolve_vault_path(sys.argv)
     except SystemExit:
-        _log_precompact_error(
-            "resolve_vault_path failed — set MEMO_VAULT_PATH or pass --vault"
-        )
+        _log_precompact_error("resolve_vault_path failed — set MEMO_VAULT_PATH or pass --vault")
         sys.exit(0)
 
     if not transcript_path or not os.path.exists(transcript_path):
@@ -105,9 +102,7 @@ def main():
         role = entry.get("role", "")
         content = entry.get("content", "")
         if isinstance(content, list):
-            content = " ".join(
-                b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-            )
+            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
         if role in ("user", "assistant") and content and content.strip():
             messages.append({"role": role, "content": content[:2000]})
 
