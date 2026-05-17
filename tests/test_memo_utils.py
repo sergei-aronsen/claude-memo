@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from concurrent.futures import ThreadPoolExecutor
-
-import pytest
 
 
 def test_vault_hash_deterministic(tmp_path):
@@ -38,6 +35,39 @@ def test_save_memo_o_excl_collision(tmp_vault, isolated_home):
     assert os.path.exists(f1) and os.path.exists(f2)
     assert "first" in open(f1).read()
     assert "second" in open(f2).read()
+
+
+def test_save_memo_includes_source_section_when_session_known(tmp_vault, isolated_home):
+    """Auto-captured note gets a `## Source` section linking back to daily-log."""
+    from memo_utils import save_memo
+
+    memo = {
+        "type": "insight",
+        "title": "Provenance Check",
+        "content": "body",
+    }
+    filepath = save_memo(memo, tmp_vault, session_id="abcdef1234567890", source="auto-memo")
+    assert filepath is not None
+    text = open(filepath).read()
+    assert "## Source" in text
+    assert "abcdef123456" in text  # session_id truncated to 12 chars
+    assert "[[daily-logs/" in text
+    assert "auto-memo" in text
+
+
+def test_save_memo_omits_source_section_for_manual(tmp_vault, isolated_home):
+    """Manual notes (session_id == 'manual') do not get a Source backlink."""
+    from memo_utils import save_memo
+
+    memo = {
+        "type": "insight",
+        "title": "Manual Note No Source",
+        "content": "body",
+    }
+    filepath = save_memo(memo, tmp_vault, source="manual")  # session_id defaults to 'manual'
+    assert filepath is not None
+    text = open(filepath).read()
+    assert "## Source" not in text
 
 
 def test_save_memo_concurrent_no_loss(tmp_vault, isolated_home):
@@ -135,7 +165,6 @@ def test_call_llm_returns_empty_string_on_legitimate_empty(monkeypatch):
     monkeypatch.delenv("MEMO_API_FALLBACK_MODEL", raising=False)
 
     import io
-    import json
     import urllib.request
 
     class _Resp:

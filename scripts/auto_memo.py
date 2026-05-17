@@ -174,7 +174,22 @@ def classify_and_extract(conversation: str, vault_path: str) -> list[dict]:
     """
     Send conversation to Claude Haiku for classification and extraction.
     Returns list of memo dicts ready to save.
+
+    The conversation is run through `privacy.strip_secrets` before it
+    leaves the machine so credentials and personal paths are not exposed
+    to the classifier API.
     """
+    from memo_utils import call_llm, memo_log, parse_json_response
+    from privacy import strip_secrets, summarize_redactions
+
+    conversation, pre_labels = strip_secrets(conversation)
+    if pre_labels:
+        memo_log(
+            vault_path,
+            f"[privacy] stripped before LLM: {summarize_redactions(pre_labels)}",
+            "auto-memo",
+        )
+
     prompt = f"""Analyze this Claude Code session transcript.
 Extract any knowledge worth saving for long-term engineering memory.
 
@@ -211,8 +226,6 @@ TRANSCRIPT:
 {conversation}"""
 
     # Use secure API client (no curl, no API key in ps)
-    from memo_utils import call_llm, memo_log, parse_json_response
-
     text = call_llm(prompt, max_tokens=4000)
     if text is None:
         # H-ROB-2: distinguish API failure from "no memo-worthy content".
@@ -235,6 +248,39 @@ TRANSCRIPT:
     return memos
 
 
+_MEMO_TEXT_FIELDS = ("title", "context", "content", "alternatives", "consequences")
+
+
+def _strip_memo_secrets(memo: dict, vault_path: str) -> dict:
+    """Second-pass redaction on the memo Haiku produced.
+
+    The LLM is instructed to summarize, not echo, but a long pasted error
+    or stack trace can survive into the structured output. We re-run
+    `strip_secrets` on every free-form field as a defense-in-depth step
+    before the note is written to the vault (which is typically
+    git-versioned and may be synced).
+    """
+    from memo_utils import memo_log
+    from privacy import strip_secrets, summarize_redactions
+
+    total_labels: list[str] = []
+    cleaned = dict(memo)
+    for field in _MEMO_TEXT_FIELDS:
+        value = cleaned.get(field)
+        if isinstance(value, str) and value:
+            new_value, labels = strip_secrets(value)
+            cleaned[field] = new_value
+            total_labels.extend(labels)
+
+    if total_labels:
+        memo_log(
+            vault_path,
+            f"[privacy] stripped before save: {summarize_redactions(total_labels)}",
+            "auto-memo",
+        )
+    return cleaned
+
+
 def _save_memo(memo: dict, vault_path: str, session_id: str) -> str | None:
     """Delegate to shared save_memo_and_index in memo_utils.
 
@@ -243,6 +289,7 @@ def _save_memo(memo: dict, vault_path: str, session_id: str) -> str | None:
     """
     from memo_utils import save_memo_and_index
 
+    memo = _strip_memo_secrets(memo, vault_path)
     return save_memo_and_index(memo, vault_path, session_id=session_id, source="auto-memo")
 
 

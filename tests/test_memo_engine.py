@@ -29,8 +29,7 @@ def test_embeddings_store_length_mismatch_raises(tmp_vault, isolated_home):
     """Reader must refuse a torn pair (emb of N+1, map of N) rather than silently corrupt."""
     from memo_engine import EmbeddingsStore, get_embeddings_path, get_id_map_path
 
-    np.save(open(get_embeddings_path(tmp_vault), "wb"),
-            np.zeros((3, 384), dtype="float32"))
+    np.save(open(get_embeddings_path(tmp_vault), "wb"), np.zeros((3, 384), dtype="float32"))
     with open(get_id_map_path(tmp_vault), "w") as f:
         json.dump([1, 2], f)
 
@@ -42,8 +41,7 @@ def test_embeddings_store_inconsistent_pair_raises(tmp_vault, isolated_home):
     """emb file present without id_map (or vice versa) must raise — caller can rebuild."""
     from memo_engine import EmbeddingsStore, get_embeddings_path
 
-    np.save(open(get_embeddings_path(tmp_vault), "wb"),
-            np.zeros((1, 384), dtype="float32"))
+    np.save(open(get_embeddings_path(tmp_vault), "wb"), np.zeros((1, 384), dtype="float32"))
 
     with pytest.raises(RuntimeError, match="inconsistent"):
         EmbeddingsStore(tmp_vault)
@@ -104,6 +102,175 @@ def test_save_memo_and_index_atomic(tmp_vault, isolated_home):
     assert row["title"] == "Atomic Save"
 
 
+def test_search_vault_records_recall(tmp_vault, isolated_home):
+    """A search hit must stamp last_recalled and bump recall_count."""
+    from memo_engine import init_db, search_vault
+    from memo_utils import save_memo_and_index
+
+    fp = save_memo_and_index(
+        {"type": "insight", "title": "Recall Target", "content": "alpha beta gamma"},
+        tmp_vault,
+        source="t",
+    )
+    assert fp is not None
+
+    results = search_vault("alpha", tmp_vault, limit=5)
+    assert results, "stub embedding model should still produce at least one hit"
+
+    conn = init_db(tmp_vault)
+    row = conn.execute(
+        "SELECT last_recalled, recall_count FROM notes WHERE title = ?",
+        ("Recall Target",),
+    ).fetchone()
+    conn.close()
+    assert row["last_recalled"] is not None
+    assert row["recall_count"] >= 1
+
+
+def test_search_vault_track_recall_disabled(tmp_vault, isolated_home):
+    """track_recall=False (internal callers) must not pollute recall stats."""
+    from memo_engine import init_db, search_vault
+    from memo_utils import save_memo_and_index
+
+    save_memo_and_index(
+        {"type": "insight", "title": "No Track", "content": "delta epsilon"},
+        tmp_vault,
+        source="t",
+    )
+
+    search_vault("delta", tmp_vault, limit=5, track_recall=False)
+
+    conn = init_db(tmp_vault)
+    row = conn.execute(
+        "SELECT last_recalled, recall_count FROM notes WHERE title = ?",
+        ("No Track",),
+    ).fetchone()
+    conn.close()
+    assert row["last_recalled"] is None
+    assert (row["recall_count"] or 0) == 0
+
+
+def test_find_stale_notes_picks_old_and_never_recalled(tmp_vault, isolated_home):
+    """Notes created long ago without any recall must appear in stale list."""
+    from memo_engine import find_stale_notes, init_db
+    from memo_utils import save_memo_and_index
+
+    fp = save_memo_and_index(
+        {"type": "insight", "title": "Ancient Note", "content": "x"},
+        tmp_vault,
+        source="t",
+    )
+    assert fp is not None
+
+    # Backdate the created field directly in SQLite so the row predates
+    # the cutoff; the production path stamps `created` to today.
+    conn = init_db(tmp_vault)
+    conn.execute("UPDATE notes SET created = '2020-01-01' WHERE title = ?", ("Ancient Note",))
+    conn.commit()
+    conn.close()
+
+    stale = find_stale_notes(tmp_vault, days=30, limit=10)
+    titles = {row["title"] for row in stale}
+    assert "Ancient Note" in titles
+
+
+def test_derive_tier_mapping():
+    """Type-to-tier mapping matches the agreed taxonomy."""
+    from memo_engine import derive_tier
+
+    assert derive_tier("decision") == "semantic"
+    assert derive_tier("pattern") == "procedural"
+    assert derive_tier("tool") == "procedural"
+    assert derive_tier("debug") == "episodic"
+    assert derive_tier("insight") == "semantic"
+    assert derive_tier("reference") == "semantic"
+    assert derive_tier("project") == "semantic"
+    assert derive_tier("daily-log") == "episodic"
+    assert derive_tier(None) == "semantic"
+    assert derive_tier("unknown-type") == "semantic"
+
+
+def test_save_memo_writes_tier_to_frontmatter(tmp_vault, isolated_home):
+    """save_memo derives and stores tier in YAML frontmatter."""
+    from memo_utils import save_memo
+
+    fp = save_memo({"type": "tool", "title": "Some Tool", "content": "x"}, tmp_vault, source="t")
+    assert fp is not None
+    text = open(fp).read()
+    assert "tier: procedural" in text
+
+
+def test_index_records_tier(tmp_vault, isolated_home):
+    """After indexing, the SQLite row exposes the tier."""
+    from memo_engine import init_db
+    from memo_utils import save_memo_and_index
+
+    fp = save_memo_and_index(
+        {"type": "debug", "title": "Crash on boot", "content": "y"},
+        tmp_vault,
+        source="t",
+    )
+    assert fp is not None
+
+    conn = init_db(tmp_vault)
+    row = conn.execute("SELECT tier FROM notes WHERE title = ?", ("Crash on boot",)).fetchone()
+    conn.close()
+    assert row["tier"] == "episodic"
+
+
+def test_polarity_detection_basic():
+    """Polarity helper distinguishes positive / negative / neutral / ambiguous."""
+    from memo_engine import _polarity
+
+    assert _polarity("Works great in production") == "positive"
+    assert _polarity("This is broken and deprecated") == "negative"
+    assert _polarity("Some neutral description here") is None
+    assert _polarity("Works but is also broken") is None
+    assert _polarity("Работает стабильно в проде") == "positive"
+    assert _polarity("Сломано, не использовать") == "negative"
+
+
+def test_find_contradictions_flags_opposed_polarity(tmp_vault, isolated_home, monkeypatch):
+    """Two near-duplicates with opposite polarity must appear in contradictions."""
+    from memo_engine import EmbeddingsStore, find_contradictions, init_db
+    from memo_utils import save_memo_and_index
+
+    a = save_memo_and_index(
+        {"type": "insight", "title": "X works in production", "content": "use this approach"},
+        tmp_vault,
+        source="t",
+    )
+    b = save_memo_and_index(
+        {"type": "insight", "title": "X is broken", "content": "do not use, deprecated"},
+        tmp_vault,
+        source="t",
+    )
+    assert a and b
+
+    # Force the two embeddings into the contradiction band [0.80, 0.97].
+    # Stub embeddings are random per text, so synthesize a controlled pair:
+    # all-ones vs all-ones with the first 20 entries negated → cosine ~ 0.90
+    # for the stub's 384-dim space (cos = (dim - 2*flipped) / dim = 0.896).
+    store = EmbeddingsStore(tmp_vault)
+    assert store.embeddings is not None and len(store.id_map) >= 2
+    dim = store.embeddings.shape[1]
+    vec = np.ones(dim, dtype="float32")
+    vec /= np.linalg.norm(vec)
+    near = np.ones(dim, dtype="float32")
+    near[:20] = -1.0
+    near /= np.linalg.norm(near)
+    store.embeddings[0] = vec
+    store.embeddings[1] = near
+    store._save()
+
+    pairs = find_contradictions(tmp_vault, sim_low=0.80, sim_high=0.99)
+    titles = {(p["title_a"], p["title_b"]) for p in pairs}
+    found = any({"X works in production", "X is broken"} <= set(pair) for pair in titles)
+    assert found, f"expected contradiction pair, got {pairs}"
+    # Conn cleanup so SQLite file is not held open beyond test scope.
+    init_db(tmp_vault).close()
+
+
 def test_find_duplicates_threshold(tmp_vault, isolated_home):
     """Identical embed_text (title + tags + body) → cos sim 1.0 → dup pair returned."""
     from memo_engine import find_duplicates
@@ -114,11 +281,13 @@ def test_find_duplicates_threshold(tmp_vault, isolated_home):
     # identical embed_text → stub embedding is bit-identical → cos sim 1.0.
     a = save_memo_and_index(
         {"type": "insight", "title": "Same Title", "project": "p", "content": "shared body"},
-        tmp_vault, source="t",
+        tmp_vault,
+        source="t",
     )
     b = save_memo_and_index(
         {"type": "insight", "title": "Same Title", "project": "p", "content": "shared body"},
-        tmp_vault, source="t",
+        tmp_vault,
+        source="t",
     )
     assert a and b and a != b
 

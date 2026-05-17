@@ -36,7 +36,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -198,7 +198,47 @@ def init_db(vault_path: str) -> sqlite3.Connection:
             VALUES (new.id, new.title, new.body, new.tags, new.aliases);
         END;
     """)
+
+    # Migration: add recall-tracking columns if missing. CREATE TABLE IF
+    # NOT EXISTS above is a no-op on an existing table, so additive
+    # columns need ALTER. SQLite raises OperationalError "duplicate
+    # column" if the column already exists — treat that as success.
+    for stmt in (
+        "ALTER TABLE notes ADD COLUMN last_recalled TEXT",
+        "ALTER TABLE notes ADD COLUMN recall_count INTEGER DEFAULT 0",
+        "ALTER TABLE notes ADD COLUMN tier TEXT",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
     return conn
+
+
+# Note `type` → memory tier mapping (working/episodic/semantic/procedural).
+# Tiers are coarser-grained than types and tell retention policies how to
+# treat a note. claude-memo currently uses tier only as metadata + a
+# stats axis; future hygiene passes can apply different decay rules per
+# tier (e.g. episodic ages out, semantic is permanent).
+_TYPE_TO_TIER: dict[str, str] = {
+    "decision": "semantic",
+    "pattern": "procedural",
+    "tool": "procedural",
+    "reference": "semantic",
+    "insight": "semantic",
+    "debug": "episodic",
+    "project": "semantic",
+    "daily-log": "episodic",
+}
+
+
+def derive_tier(memo_type: str | None) -> str:
+    """Return the memory tier for a given note type (default: semantic)."""
+    if not memo_type:
+        return "semantic"
+    return _TYPE_TO_TIER.get(memo_type, "semantic")
 
 
 # ─── Embeddings store ───
@@ -413,12 +453,15 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
     aliases_json = json.dumps(meta.get("aliases", []))
     wikilinks_json = json.dumps(wikilinks)
     now = datetime.now().isoformat()
+    # Tier from frontmatter wins; fall back to derive_tier so legacy
+    # notes (no `tier:` field) still get a sensible default.
+    tier = meta.get("tier") or derive_tier(meta.get("type"))
 
     if existing:
         conn.execute(
             """
             UPDATE notes SET
-                filename=?, title=?, type=?, project=?, created=?, updated=?,
+                filename=?, title=?, type=?, tier=?, project=?, created=?, updated=?,
                 tags=?, aliases=?, wikilinks=?, content_hash=?, indexed_at=?, body=?
             WHERE id=?
         """,
@@ -426,6 +469,7 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
                 os.path.basename(filepath),
                 title,
                 meta.get("type"),
+                tier,
                 meta.get("project"),
                 meta.get("created"),
                 meta.get("updated"),
@@ -442,16 +486,17 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
     else:
         cur = conn.execute(
             """
-            INSERT INTO notes (filepath, filename, title, type, project, created,
+            INSERT INTO notes (filepath, filename, title, type, tier, project, created,
                              updated, tags, aliases, wikilinks, content_hash,
                              indexed_at, body)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 rel_path,
                 os.path.basename(filepath),
                 title,
                 meta.get("type"),
+                tier,
                 meta.get("project"),
                 meta.get("created"),
                 meta.get("updated"),
@@ -497,23 +542,53 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
     return note_id
 
 
-def search_vault(query: str, vault_path: str, limit: int = 10, threshold: float = 0.0):
-    """Combined semantic + keyword search."""
+# RRF constant from Cormack et al. 2009 ("Reciprocal Rank Fusion outperforms
+# Condorcet and individual rank learning methods"). k=60 is the canonical
+# value; dampens contribution from low-ranked items without zeroing them.
+RRF_K = 60
+
+
+def search_vault(
+    query: str,
+    vault_path: str,
+    limit: int = 10,
+    threshold: float = 0.0,
+    track_recall: bool = True,
+):
+    """Hybrid semantic + keyword search ranked via Reciprocal Rank Fusion.
+
+    RRF fuses ranks (not raw scores) across rankers:
+        score = sum_i 1 / (RRF_K + rank_i)
+
+    More robust than weighted score sums because cosine similarity (0-1)
+    and FTS5 BM25-style rank live on incomparable scales, so any fixed
+    weight (e.g. 0.6/0.4) biases toward whichever ranker emits larger
+    raw values for a given query. Rank-based fusion sidesteps that.
+
+    `threshold` filters candidates by raw semantic score (cosine, 0-1)
+    before fusion, preserving the prior "minimum relevance" gate for
+    existing call sites that pass threshold=0.3.
+    """
     conn = init_db(vault_path)
     try:
         store = EmbeddingsStore(vault_path)
 
-        results = {}
+        # rank == 0 sentinel means "not present in this ranker"
+        candidates: dict[int, dict[str, float]] = {}
 
-        # 1. Semantic search (e5 models need "query: " prefix)
+        # 1. Semantic ranking (e5 models need "query: " prefix internally)
         query_emb = encode_query(query)
-        sem_results = store.search(query_emb, top_k=limit * 2)
-
-        for note_id, score in sem_results:
+        sem_results = store.search(query_emb, top_k=limit * 4)
+        for rank, (note_id, score) in enumerate(sem_results, start=1):
             if score >= threshold:
-                results[note_id] = {"semantic_score": score, "keyword_score": 0.0}
+                candidates[note_id] = {
+                    "semantic_score": float(score),
+                    "semantic_rank": rank,
+                    "keyword_score": 0.0,
+                    "keyword_rank": 0,
+                }
 
-        # 2. Keyword search via FTS5
+        # 2. Keyword ranking via FTS5
         try:
             # Escape special FTS5 characters and quote terms to prevent operator interpretation
             safe_query = re.sub(r"[^\w\s]", " ", query)
@@ -525,17 +600,23 @@ def search_vault(query: str, vault_path: str, limit: int = 10, threshold: float 
                 SELECT rowid, rank FROM notes_fts WHERE notes_fts MATCH ?
                 ORDER BY rank LIMIT ?
             """,
-                (fts_query, limit * 2),
+                (fts_query, limit * 4),
             ).fetchall()
 
-            for row in rows:
+            for kw_rank, row in enumerate(rows, start=1):
                 note_id = row["rowid"]
-                # Normalize FTS rank to 0-1 range (rank is negative, lower = better)
+                # Keep a normalized score field for diagnostics; ranking uses kw_rank
                 keyword_score = min(1.0, 1.0 / (1.0 + abs(row["rank"])))
-                if note_id in results:
-                    results[note_id]["keyword_score"] = keyword_score
+                if note_id in candidates:
+                    candidates[note_id]["keyword_score"] = keyword_score
+                    candidates[note_id]["keyword_rank"] = kw_rank
                 else:
-                    results[note_id] = {"semantic_score": 0.0, "keyword_score": keyword_score}
+                    candidates[note_id] = {
+                        "semantic_score": 0.0,
+                        "semantic_rank": 0,
+                        "keyword_score": keyword_score,
+                        "keyword_rank": kw_rank,
+                    }
         except sqlite3.OperationalError as e:
             # H-ROB-5: only swallow expected FTS errors (empty MATCH, bad
             # FTS syntax). Other Exceptions used to be silently dropped,
@@ -543,18 +624,22 @@ def search_vault(query: str, vault_path: str, limit: int = 10, threshold: float 
             # invisible. Now log via stderr so a hook caller can capture it.
             print(f"[memo_engine] FTS search failed: {e}", file=sys.stderr)
 
-        # 3. Combine scores (weighted: 60% semantic, 40% keyword)
+        # 3. RRF fusion across rankers present for each candidate
         scored = []
-        for note_id, scores in results.items():
-            combined = 0.6 * scores["semantic_score"] + 0.4 * scores["keyword_score"]
-            scored.append((note_id, combined, scores["semantic_score"], scores["keyword_score"]))
+        for note_id, c in candidates.items():
+            rrf = 0.0
+            if c["semantic_rank"] > 0:
+                rrf += 1.0 / (RRF_K + c["semantic_rank"])
+            if c["keyword_rank"] > 0:
+                rrf += 1.0 / (RRF_K + c["keyword_rank"])
+            scored.append((note_id, rrf, c["semantic_score"], c["keyword_score"]))
 
         scored.sort(key=lambda x: x[1], reverse=True)
         scored = scored[:limit]
 
         # 4. Fetch note metadata
         output = []
-        for note_id, combined, sem, kw in scored:
+        for note_id, rrf_score, sem, kw in scored:
             row = conn.execute(
                 "SELECT filepath, title, type, project, tags, created FROM notes WHERE id = ?", (note_id,)
             ).fetchone()
@@ -568,11 +653,29 @@ def search_vault(query: str, vault_path: str, limit: int = 10, threshold: float 
                         "project": row["project"],
                         "tags": row["tags"],
                         "created": row["created"],
-                        "score": round(combined, 3),
+                        "score": round(rrf_score, 4),
                         "semantic": round(sem, 3),
                         "keyword": round(kw, 3),
                     }
                 )
+
+        # 5. Recall tracking: stamp the returned hits with the current
+        # timestamp and bump their counter in one statement. Used later
+        # by decay-aware hygiene (stale-but-never-recalled notes can be
+        # surfaced for review). Disabled via track_recall=False for
+        # internal callers (reindex, dedup) so synthetic queries don't
+        # pollute the signal.
+        if track_recall and output:
+            now_iso = datetime.now().isoformat(timespec="seconds")
+            ids = [r["id"] for r in output]
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                f"UPDATE notes SET last_recalled = ?, "  # nosec B608
+                f"recall_count = COALESCE(recall_count, 0) + 1 "
+                f"WHERE id IN ({placeholders})",
+                [now_iso, *ids],
+            )
+            conn.commit()
 
         return output
     finally:
@@ -646,6 +749,170 @@ def find_duplicates(vault_path: str, threshold: float = 0.7):
         conn.close()
 
 
+_POSITIVE_MARKERS = (
+    "works",
+    "use this",
+    "recommended",
+    "stable",
+    "use in production",
+    "preferred",
+    "go-to",
+    "shipping",
+    "shipped",
+    "verified",
+    "confirmed",
+    "tested",
+    "working",
+    "fixed",
+    "resolved",
+    "use ",
+    "работает",
+    "стабильно",
+    "рекомендуется",
+    "используем",
+    "одобрено",
+    "проверено",
+    "исправлено",
+    "решено",
+)
+
+_NEGATIVE_MARKERS = (
+    "broken",
+    "fails",
+    "failing",
+    "deprecated",
+    "obsolete",
+    "avoid",
+    "do not use",
+    "don't use",
+    "wrong",
+    "removed",
+    "replaced",
+    "abandoned",
+    "regression",
+    "regressed",
+    "rolled back",
+    "rollback",
+    "unstable",
+    "не работает",
+    "сломан",
+    "сломано",
+    "сломалось",
+    "не использовать",
+    "устарел",
+    "устарело",
+    "удалено",
+    "заменено",
+    "откатили",
+    "регрессия",
+    "нестабильно",
+)
+
+
+def _polarity(text: str) -> str | None:
+    """Detect 'positive' / 'negative' polarity via keyword markers.
+
+    Returns None when the note is neutral or mentions both kinds of
+    markers (ambiguous). The lowercase-substring check is intentionally
+    cheap and conservative — false positives here become noise in the
+    contradiction report, not destructive actions.
+    """
+    if not text:
+        return None
+    haystack = text.lower()
+    has_pos = any(m in haystack for m in _POSITIVE_MARKERS)
+    has_neg = any(m in haystack for m in _NEGATIVE_MARKERS)
+    if has_pos and not has_neg:
+        return "positive"
+    if has_neg and not has_pos:
+        return "negative"
+    return None
+
+
+def find_contradictions(
+    vault_path: str,
+    sim_low: float = 0.80,
+    sim_high: float = 0.97,
+    limit: int = 50,
+):
+    """Surface pairs of notes that look like contradictions of each other.
+
+    Heuristic: semantically similar enough to be about the same thing
+    (sim_low ≤ cosine ≤ sim_high — exact dups are excluded so they stay
+    in the dedup flow) AND one has positive-polarity markers while the
+    other has negative-polarity markers in title/body.
+
+    Cheap on purpose: lowercase substring scan over a small marker list.
+    False positives are tolerable because the output is a review list,
+    not an automated rewrite. Notes with no markers (most of them) are
+    silently skipped.
+    """
+    conn = init_db(vault_path)
+    try:
+        store = EmbeddingsStore(vault_path)
+        if store.embeddings is None or len(store.id_map) < 2:
+            return []
+
+        emb = store.embeddings
+        norms = np.linalg.norm(emb, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        normalized = emb / norms
+        sim_matrix = normalized @ normalized.T
+
+        n = len(store.id_map)
+        ii, jj = np.triu_indices(n, k=1)
+        sims = sim_matrix[ii, jj]
+        band_mask = (sims >= sim_low) & (sims <= sim_high)
+        hit_i = ii[band_mask]
+        hit_j = jj[band_mask]
+        hit_sims = sims[band_mask]
+
+        if len(hit_i) == 0:
+            return []
+
+        involved_ids = sorted({int(store.id_map[i]) for i in hit_i} | {int(store.id_map[j]) for j in hit_j})
+        placeholders = ",".join("?" * len(involved_ids))
+        rows = conn.execute(
+            f"SELECT id, filepath, title, body FROM notes WHERE id IN ({placeholders})",  # nosec B608
+            involved_ids,
+        ).fetchall()
+        # Cache polarity per note to avoid recomputing across pairs.
+        polarity_by_id: dict[int, str | None] = {}
+        meta_by_id: dict[int, sqlite3.Row] = {}
+        for row in rows:
+            meta_by_id[row["id"]] = row
+            polarity_by_id[row["id"]] = _polarity(f"{row['title']}\n{row['body'] or ''}")
+
+        contradictions: list[dict[str, Any]] = []
+        for i_idx, j_idx, sim in zip(hit_i, hit_j, hit_sims):
+            id_a = int(store.id_map[i_idx])
+            id_b = int(store.id_map[j_idx])
+            pa = polarity_by_id.get(id_a)
+            pb = polarity_by_id.get(id_b)
+            if pa is None or pb is None or pa == pb:
+                continue
+            row_a = meta_by_id.get(id_a)
+            row_b = meta_by_id.get(id_b)
+            if not (row_a and row_b):
+                continue
+            contradictions.append(
+                {
+                    "title_a": row_a["title"],
+                    "path_a": row_a["filepath"],
+                    "polarity_a": pa,
+                    "title_b": row_b["title"],
+                    "path_b": row_b["filepath"],
+                    "polarity_b": pb,
+                    "similarity": round(float(sim), 3),
+                }
+            )
+
+        contradictions.sort(key=lambda x: x["similarity"], reverse=True)
+        return contradictions[:limit]
+    finally:
+        conn.close()
+
+
 def list_notes(vault_path: str, limit: int = 10):
     """List recent notes."""
     conn = init_db(vault_path)
@@ -668,6 +935,10 @@ def vault_stats(vault_path: str):
     try:
         total = conn.execute("SELECT COUNT(*) as c FROM notes").fetchone()["c"]
         by_type = conn.execute("SELECT type, COUNT(*) as c FROM notes GROUP BY type ORDER BY c DESC").fetchall()
+        by_tier = conn.execute(
+            "SELECT COALESCE(tier, 'unset') AS tier, COUNT(*) as c "
+            "FROM notes GROUP BY COALESCE(tier, 'unset') ORDER BY c DESC"
+        ).fetchall()
         by_project = conn.execute(
             "SELECT project, COUNT(*) as c FROM notes WHERE project IS NOT NULL GROUP BY project ORDER BY c DESC"
         ).fetchall()
@@ -693,13 +964,57 @@ def vault_stats(vault_path: str):
             for tag in tags:
                 tag_freq[tag] = tag_freq.get(tag, 0) + 1
 
+        # Recall stats: how many notes have been retrieved by a search,
+        # how many never have. Coalesce because pre-migration rows have
+        # NULL recall_count.
+        recall_row = conn.execute(
+            "SELECT "
+            "COUNT(*) FILTER (WHERE COALESCE(recall_count, 0) > 0) AS recalled, "
+            "COUNT(*) FILTER (WHERE COALESCE(recall_count, 0) = 0) AS never_recalled, "
+            "MAX(last_recalled) AS most_recent_recall "
+            "FROM notes"
+        ).fetchone()
+
         return {
             "total_notes": total,
             "by_type": [(dict(r)["type"] or "untyped", dict(r)["c"]) for r in by_type],
+            "by_tier": [(dict(r)["tier"], dict(r)["c"]) for r in by_tier],
             "by_project": [(dict(r)["project"], dict(r)["c"]) for r in by_project],
             "most_connected": link_counts[:10],
             "top_tags": sorted(tag_freq.items(), key=lambda x: x[1], reverse=True)[:15],
+            "recall": {
+                "recalled": recall_row["recalled"] if recall_row else 0,
+                "never_recalled": recall_row["never_recalled"] if recall_row else 0,
+                "most_recent": recall_row["most_recent_recall"] if recall_row else None,
+            },
         }
+    finally:
+        conn.close()
+
+
+def find_stale_notes(vault_path: str, days: int = 90, limit: int = 50):
+    """Return notes never recalled, or last recalled more than `days` ago.
+
+    Stale = (recall_count == 0 AND created older than `days`)
+            OR (last_recalled older than `days`).
+
+    Useful for vault hygiene: surfaces notes that may have aged out of
+    relevance for review/merge/archive.
+    """
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    conn = init_db(vault_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, filepath, title, type, created, last_recalled, "
+            "COALESCE(recall_count, 0) AS recall_count "
+            "FROM notes "
+            "WHERE (COALESCE(recall_count, 0) = 0 AND created < ?) "
+            "   OR (last_recalled IS NOT NULL AND last_recalled < ?) "
+            "ORDER BY COALESCE(last_recalled, created) ASC "
+            "LIMIT ?",
+            (cutoff, cutoff, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -1221,9 +1536,11 @@ def main():
             "search",
             "query",
             "dedup",
+            "contradictions",
             "lint",
             "list",
             "stats",
+            "stale",
             "reindex",
             "warm-up",
             "obsidian-info",
@@ -1233,6 +1550,7 @@ def main():
     parser.add_argument("--vault", default="", help="Path to vault root")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--threshold", type=float, default=0.0)
+    parser.add_argument("--days", type=int, default=90, help="Stale threshold for `stale` command (days)")
     parser.add_argument(
         "--incremental", action="store_true", help="Incremental reindex: only changed files (default for cron)"
     )
@@ -1280,6 +1598,10 @@ def main():
         pairs = find_duplicates(vault, th)
         print(json.dumps(pairs, indent=2, ensure_ascii=False))
 
+    elif args.command == "contradictions":
+        pairs = find_contradictions(vault, limit=args.limit)
+        print(json.dumps(pairs, indent=2, ensure_ascii=False))
+
     elif args.command == "lint":
         issues = lint_vault(vault)
         summary = issues.pop("_summary", {})
@@ -1304,6 +1626,10 @@ def main():
     elif args.command == "stats":
         s = vault_stats(vault)
         print(json.dumps(s, indent=2, ensure_ascii=False))
+
+    elif args.command == "stale":
+        rows = find_stale_notes(vault, days=args.days, limit=args.limit)
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
 
     elif args.command == "reindex":
         with VaultLock(vault):

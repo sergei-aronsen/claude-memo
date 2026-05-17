@@ -569,8 +569,17 @@ def save_memo(
     aliases = memo.get("aliases", [])
     project = memo.get("project")
 
+    # Derive the memory tier (working/episodic/semantic/procedural) from
+    # the note type. Stored in frontmatter so retention/decay policies can
+    # treat episodic and semantic notes differently without re-parsing
+    # the type field across the vault. Memo dict can override via "tier".
+    from memo_engine import derive_tier
+
+    tier = memo.get("tier") or derive_tier(memo_type)
+
     fm_dict = {
         "type": memo_type,
+        "tier": tier,
         "created": today,
         "updated": today,
         "source": source,
@@ -607,6 +616,17 @@ def save_memo(
 
     if memo.get("consequences"):
         sections.append(f"## Consequences\n\n{memo['consequences']}\n")
+
+    # Provenance: backlink to the daily-log + session that produced the
+    # note. Lets a future reader jump from a distilled note back to the
+    # raw conversation. Skipped for manually-created notes.
+    if session_id != "manual":
+        source_lines = [
+            f"- Session: `{session_id[:12]}`",
+            f"- Daily log: [[daily-logs/{today}]]",
+            f"- Source: {source}",
+        ]
+        sections.append("## Source\n\n" + "\n".join(source_lines) + "\n")
 
     # Related links
     related = memo.get("related", [])
