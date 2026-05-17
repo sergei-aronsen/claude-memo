@@ -30,7 +30,7 @@ AUTO_PROCESSED_MARKER = "<!-- auto-processed"
 AUTO_PROCESSING_MARKER = "<!-- auto-processing"  # claim written BEFORE Stage 2 Haiku call
 
 
-def find_uncompiled_logs(vault_path: str, target_date: str = None) -> list[str]:
+def find_uncompiled_logs(vault_path: str, target_date: str | None = None) -> list[str]:
     """Find daily log files that haven't been compiled yet.
 
     Skips logs that:

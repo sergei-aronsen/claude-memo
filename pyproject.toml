@@ -24,9 +24,12 @@ dev = [
     "pip-audit>=2.7",
 ]
 
-[build-system]
-requires = ["uv_build>=0.11.6,<0.12"]
-build-backend = "uv_build"
+[tool.uv]
+# claude-memo is a script bundle, not a distributable package — no
+# wheel is built, install is `git clone + pip install -r requirements.txt`.
+# Setting package=false (and omitting [build-system]) tells uv to install
+# dependencies into the env without attempting to build the project.
+package = false
 
 [tool.ruff]
 line-length = 120

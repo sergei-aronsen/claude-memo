@@ -53,12 +53,12 @@ def get_project_name(cwd: str) -> str | None:
     cache_key = hashlib.sha256(cwd.encode("utf-8")).hexdigest()[:16]
     cache = _load_cache()
     cached = cache.get(cache_key)
-    if isinstance(cached, dict) and time.time() - cached.get("ts", 0) < _CACHE_TTL_SECONDS:
-        name = cached.get("name")
-        if isinstance(name, str) and name:
-            return name
-
     name: str | None = None
+    if isinstance(cached, dict) and time.time() - cached.get("ts", 0) < _CACHE_TTL_SECONDS:
+        cached_name = cached.get("name")
+        if isinstance(cached_name, str) and cached_name:
+            return cached_name
+
     try:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],

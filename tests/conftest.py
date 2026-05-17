@@ -11,21 +11,17 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
 import types
 
 import numpy as np
 import pytest
-
 
 SCRIPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 
 def _install_sentence_transformers_stub() -> None:
     """Inject a fake sentence_transformers module before memo_engine imports it."""
-    if "sentence_transformers" in sys.modules and not getattr(
-        sys.modules["sentence_transformers"], "_is_stub", False
-    ):
+    if "sentence_transformers" in sys.modules and not getattr(sys.modules["sentence_transformers"], "_is_stub", False):
         return
 
     class _StubModel:
@@ -80,9 +76,7 @@ def tmp_vault(tmp_path, monkeypatch):
         "daily-logs",
     ):
         (vault / sub).mkdir(parents=True, exist_ok=True)
-    (vault / "INDEX.md").write_text(
-        "# Test Vault Index\n\n", encoding="utf-8"
-    )
+    (vault / "INDEX.md").write_text("# Test Vault Index\n\n", encoding="utf-8")
 
     from memo_utils import _vault_hash
 

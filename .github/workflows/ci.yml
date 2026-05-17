@@ -36,13 +36,13 @@ jobs:
         run: pip install ruff mypy types-PyYAML bandit==1.9.4 pip-audit pytest pytest-cov
 
       - name: Lint (ruff)
-        run: ruff check scripts/
+        run: ruff check scripts/ tests/
 
       - name: Format check (ruff)
-        run: ruff format --check scripts/
+        run: ruff format --check scripts/ tests/
 
       - name: Type check (mypy)
-        run: mypy scripts/memo_engine.py scripts/auto_memo.py
+        run: mypy scripts/
 
       - name: Security scan (bandit)
         run: bandit -r scripts/ -ll
