@@ -498,6 +498,65 @@ def test_detect_supersede_spares_newer_and_same_polarity(tmp_vault, isolated_hom
     assert superseded == []
 
 
+def test_expand_query_parses_llm_json(tmp_vault, isolated_home, monkeypatch):
+    """_expand_query returns parsed reformulations and drops the original."""
+    import memo_engine
+
+    monkeypatch.setattr(memo_engine, "call_llm", lambda *a, **k: '["alpha term", "beta term", "db pool"]')
+    variants = memo_engine._expand_query("db pool", max_variants=3)
+    assert "alpha term" in variants
+    assert "beta term" in variants
+    assert "db pool" not in variants  # original excluded (case-insensitive)
+
+
+def test_expand_query_handles_bad_llm_output(tmp_vault, isolated_home, monkeypatch):
+    """Garbage / None from the LLM yields no variants (graceful fallback)."""
+    import memo_engine
+
+    monkeypatch.setattr(memo_engine, "call_llm", lambda *a, **k: None)
+    assert memo_engine._expand_query("anything") == []
+    monkeypatch.setattr(memo_engine, "call_llm", lambda *a, **k: "not json at all")
+    assert memo_engine._expand_query("anything") == []
+
+
+def test_expanded_search_runs_and_dedupes(tmp_vault, isolated_home, monkeypatch):
+    """expand=True calls the LLM and returns de-duplicated, merged results."""
+    import memo_engine
+    from memo_engine import search_vault
+    from memo_utils import save_memo_and_index
+
+    save_memo_and_index({"type": "insight", "title": "Note A", "content": "alpha content"}, tmp_vault, source="t")
+    save_memo_and_index({"type": "insight", "title": "Note B", "content": "beta content"}, tmp_vault, source="t")
+
+    calls = {"n": 0}
+
+    def fake_llm(*a, **k):
+        calls["n"] += 1
+        return '["beta"]'
+
+    monkeypatch.setattr(memo_engine, "call_llm", fake_llm)
+    res = search_vault("alpha", tmp_vault, limit=10, threshold=0.0, expand=True, track_recall=False)
+    assert calls["n"] >= 1, "expansion must call the LLM"
+    ids = [r["id"] for r in res]
+    assert len(ids) == len(set(ids)), "results must be de-duplicated by note id"
+
+
+def test_search_expand_off_by_default_no_llm(tmp_vault, isolated_home, monkeypatch):
+    """With MEMO_QUERY_EXPANSION unset, search must not invoke the LLM."""
+    import memo_engine
+    from memo_engine import search_vault
+    from memo_utils import save_memo_and_index
+
+    save_memo_and_index({"type": "insight", "title": "Plain", "content": "gamma content"}, tmp_vault, source="t")
+
+    def boom(*a, **k):
+        raise AssertionError("LLM must not be called when expansion is off")
+
+    monkeypatch.delenv("MEMO_QUERY_EXPANSION", raising=False)
+    monkeypatch.setattr(memo_engine, "call_llm", boom)
+    search_vault("gamma", tmp_vault, limit=5, track_recall=False)  # must not raise
+
+
 def test_find_duplicates_threshold(tmp_vault, isolated_home):
     """Identical embed_text (title + tags + body) → cos sim 1.0 → dup pair returned."""
     from memo_engine import find_duplicates
