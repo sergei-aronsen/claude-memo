@@ -40,7 +40,14 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
-from memo_utils import build_frontmatter, call_llm, get_memo_dir, memo_log, parse_frontmatter
+from memo_utils import (
+    build_frontmatter,
+    call_llm,
+    get_memo_dir,
+    memo_log,
+    parse_frontmatter,
+    parse_json_response,
+)
 
 # ─── Model config ───
 
@@ -609,6 +616,7 @@ def search_vault(
     track_recall: bool = True,
     max_per_project: int | None = 3,
     include_superseded: bool = False,
+    expand: bool | None = None,
 ):
     """Hybrid semantic + keyword search ranked via Reciprocal Rank Fusion.
 
@@ -628,7 +636,15 @@ def search_vault(
     single noisy project cannot crowd out the rest (set None to disable).
     `include_superseded` keeps notes marked archived/superseded in results
     (default excludes them — see F1/F3).
+
+    `expand` (F4) runs LLM query expansion: None reads MEMO_QUERY_EXPANSION
+    (off by default — adds latency + cost per search); True/False force it.
     """
+    if expand is None:
+        expand = os.environ.get("MEMO_QUERY_EXPANSION", "0") == "1"
+    if expand:
+        return _expanded_search(query, vault_path, limit, threshold, track_recall, max_per_project, include_superseded)
+
     conn = init_db(vault_path)
     try:
         store = EmbeddingsStore(vault_path)
@@ -761,6 +777,113 @@ def search_vault(
         return output
     finally:
         conn.close()
+
+
+def _expand_query(query: str, max_variants: int = 3) -> list[str]:
+    """LLM-generated alternative phrasings of `query` (original excluded).
+
+    F4 helper. Uses the shared provider client (SSRF-allowlisted). Returns []
+    on any failure so callers fall back to plain search. System rules are
+    kept separate from the user query (sandwich pattern).
+    """
+    system = (
+        "You rewrite a search query into alternative phrasings to improve "
+        "recall over an engineering knowledge base. Return ONLY a JSON array "
+        "of strings — no prose. Each item is a distinct reformulation "
+        "(synonyms, related terms, broader or narrower wording)."
+    )
+    prompt = f"Query: {query}\nReturn up to {max_variants} reformulations as a JSON array of strings."
+    raw = call_llm(prompt, max_tokens=300, system=system)
+    if not raw:
+        return []
+    parsed = parse_json_response(raw)
+    if not isinstance(parsed, list):
+        return []
+    variants: list[str] = []
+    for item in parsed:
+        s = str(item).strip()
+        if s and s.lower() != query.lower() and len(s) <= 300:
+            variants.append(s)
+    return variants[:max_variants]
+
+
+def _diversify_dicts(results: list[dict], limit: int, max_per_project: int) -> list[dict]:
+    """Per-project cap over result dicts (dict twin of _diversify_by_project)."""
+    selected: list[dict] = []
+    deferred: list[dict] = []
+    per_project: dict[str, int] = {}
+    for r in results:
+        project = r.get("project")
+        if not project or per_project.get(project, 0) < max_per_project:
+            selected.append(r)
+            if project:
+                per_project[project] = per_project.get(project, 0) + 1
+            if len(selected) >= limit:
+                return selected
+        else:
+            deferred.append(r)
+    for r in deferred:
+        if len(selected) >= limit:
+            break
+        selected.append(r)
+    return selected[:limit]
+
+
+def _expanded_search(
+    query: str,
+    vault_path: str,
+    limit: int,
+    threshold: float,
+    track_recall: bool,
+    max_per_project: int | None,
+    include_superseded: bool,
+) -> list[dict]:
+    """Run search across the query + its reformulations, merge by note id.
+
+    Each variant is searched with plain ranking (expand=False, no recall
+    tracking, no per-variant project cap); results are unioned keeping the
+    highest RRF score per note, then re-diversified, trimmed, and recall is
+    stamped once on the final set.
+    """
+    variants = [query, *_expand_query(query)]
+    merged: dict[int, dict] = {}
+    for variant in variants:
+        for r in search_vault(
+            variant,
+            vault_path,
+            limit=max(limit * 3, limit),
+            threshold=threshold,
+            track_recall=False,
+            max_per_project=None,
+            include_superseded=include_superseded,
+            expand=False,
+        ):
+            cur = merged.get(r["id"])
+            if cur is None or r["score"] > cur["score"]:
+                merged[r["id"]] = r
+
+    results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+    if max_per_project is not None:
+        results = _diversify_dicts(results, limit, max_per_project)
+    else:
+        results = results[:limit]
+
+    if track_recall and results:
+        conn = init_db(vault_path)
+        try:
+            now_iso = datetime.now().isoformat(timespec="seconds")
+            ids = [r["id"] for r in results]
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                f"UPDATE notes SET last_recalled = ?, "  # nosec B608
+                f"recall_count = COALESCE(recall_count, 0) + 1 "
+                f"WHERE id IN ({placeholders})",
+                [now_iso, *ids],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return results
 
 
 def find_duplicates(vault_path: str, threshold: float = 0.7):
