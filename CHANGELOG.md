@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Tier-aware decay (`memo_decay` / `decay` CLI)** — archive-only auto-forget.
+  Episodic notes (debug logs) decay at `--days`; semantic/procedural knowledge
+  only when never-recalled, orphaned, and far older. Dry-run by default;
+  `--apply` relocates notes to `archive/` and flags frontmatter. Never deletes.
+- **Search project diversification** — `search_vault` caps how many head
+  results come from one project (`max_per_project`, default 3) with best-first
+  backfill, so a single noisy project cannot crowd out recall.
+- **Note versioning / supersedes** — on save, a new note that contradicts an
+  older one (high cosine + opposite polarity, older target) flags the older
+  note `status=superseded`; superseded/archived notes drop from default search.
+  Conservative + reversible; opt out via `MEMO_AUTO_SUPERSEDE=0`.
+- **Opt-in query expansion** — `MEMO_QUERY_EXPANSION=1` reformulates the query
+  via the LLM, unions results across variants, and re-ranks. Off by default.
+- `status` + `superseded_by` columns (additive migration); lifecycle state is
+  persisted to frontmatter so it survives a full reindex.
+
+### Notes
+
+- Considered porting agentmemory's broad auto-capture hooks (PostToolUse /
+  SubagentStop) but deliberately did **not**: the SessionEnd pipeline already
+  suppresses subagent events as noise by design, and curated-markdown capture
+  would flood the vault. Capture stays high-signal.
+
 ## [1.0.0] - 2026-04-13
 
 ### Added
