@@ -48,13 +48,18 @@ jobs:
         run: bandit -r scripts/ -ll
 
       - name: Dependency audit
-        # CVE-2026-1839 (transformers Trainer._load_rng_state arbitrary
-        # code execution via malicious checkpoint) does not apply: we use
-        # transformers only for SentenceTransformer.encode inference, no
-        # Trainer, no checkpoint loading from untrusted sources. The fix
-        # ships in transformers 5.0.0rc3 (release candidate) which
-        # sentence-transformers <3.5 doesn't accept yet.
-        run: pip-audit -r requirements.txt --ignore-vuln GHSA-69w3-r845-3855
+        # Two transformers advisories are suppressed; BOTH are checkpoint /
+        # untrusted-model-file deserialization RCEs, and NEITHER is reachable
+        # here: claude-memo uses transformers only for SentenceTransformer.encode
+        # inference against a fixed, trusted model (intfloat/multilingual-e5-large).
+        # It never loads untrusted checkpoints, runs Trainer, or converts models.
+        #   - GHSA-69w3-r845-3855 / CVE-2026-1839: Trainer._load_rng_state RCE
+        #     via malicious checkpoint.
+        #   - PYSEC-2025-217 / CVE-2025-14929: X-CLIP checkpoint-conversion
+        #     deserialization RCE.
+        # Both are fixed only in transformers 5.0.0rc+ which sentence-transformers
+        # <3.5 does not accept yet, so we cannot bump out of them.
+        run: pip-audit -r requirements.txt --ignore-vuln GHSA-69w3-r845-3855 --ignore-vuln PYSEC-2025-217
 
       - name: Unit tests
         run: pytest tests/ --cov=scripts --cov-report=xml --cov-report=term
