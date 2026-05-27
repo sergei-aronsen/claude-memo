@@ -406,6 +406,43 @@ def memo_find_duplicates(threshold: float = 0.85) -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+def memo_decay(days: int = 90, apply: bool = False) -> str:
+    """Surface (or archive) notes that have aged out of relevance.
+
+    Tier-aware: episodic notes (debug logs) decay faster than semantic /
+    procedural knowledge (decisions, patterns), which decay only when never
+    recalled AND orphaned AND much older. Never deletes — archived notes move
+    to archive/ and are excluded from search but kept on disk (reversible).
+
+    Args:
+        days: Age threshold in days (default 90).
+        apply: False (default) = dry run that only reports candidates.
+               True = actually archive them.
+    """
+    from memo_engine import archive_stale_notes
+
+    vault = get_vault_path()
+    report = archive_stale_notes(vault, days=max(1, days), apply=bool(apply))
+
+    if report["dry_run"]:
+        cands = report["candidates"]
+        if not cands:
+            return f"No notes older than {report['days']}d are eligible for decay. Vault is tidy."
+        lines = [f"DRY RUN — {len(cands)} note(s) would be archived (call with apply=true to do it):\n"]
+        for c in cands[:50]:
+            lines.append(f"- [{c['tier']}] {c['title']}\n  {c['filepath']} — {c['reason']}")
+        return _truncate_response("\n".join(lines))
+
+    arch = report["archived"]
+    if not arch:
+        return "Nothing archived."
+    lines = [f"Archived {len(arch)} note(s) into archive/:\n"]
+    for a in arch[:50]:
+        lines.append(f"- {a['title']}\n  {a['from']} → {a['to']}")
+    return _truncate_response("\n".join(lines))
+
+
 # ─── Run ───
 
 if __name__ == "__main__":

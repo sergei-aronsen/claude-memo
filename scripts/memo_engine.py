@@ -40,7 +40,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
-from memo_utils import call_llm, get_memo_dir, memo_log, parse_frontmatter
+from memo_utils import build_frontmatter, call_llm, get_memo_dir, memo_log, parse_frontmatter
 
 # ─── Model config ───
 
@@ -461,13 +461,19 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
     # Tier from frontmatter wins; fall back to derive_tier so legacy
     # notes (no `tier:` field) still get a sensible default.
     tier = meta.get("tier") or derive_tier(meta.get("type"))
+    # Lifecycle state is persisted in frontmatter so it survives a full
+    # reindex (which drops the DB and re-reads files). Without this, an
+    # archived/superseded note would silently come back to life on rebuild.
+    status = meta.get("status")
+    superseded_by = meta.get("superseded_by")
 
     if existing:
         conn.execute(
             """
             UPDATE notes SET
                 filename=?, title=?, type=?, tier=?, project=?, created=?, updated=?,
-                tags=?, aliases=?, wikilinks=?, content_hash=?, indexed_at=?, body=?
+                tags=?, aliases=?, wikilinks=?, content_hash=?, indexed_at=?, body=?,
+                status=?, superseded_by=?
             WHERE id=?
         """,
             (
@@ -484,6 +490,8 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
                 file_hash,
                 now,
                 body,
+                status,
+                superseded_by,
                 existing["id"],
             ),
         )
@@ -493,8 +501,8 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
             """
             INSERT INTO notes (filepath, filename, title, type, tier, project, created,
                              updated, tags, aliases, wikilinks, content_hash,
-                             indexed_at, body)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             indexed_at, body, status, superseded_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 rel_path,
@@ -511,6 +519,8 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
                 file_hash,
                 now,
                 body,
+                status,
+                superseded_by,
             ),
         )
         note_id = cur.lastrowid
@@ -1090,6 +1100,154 @@ def find_stale_notes(vault_path: str, days: int = 90, limit: int = 50):
         conn.close()
 
 
+# Semantic/procedural notes (decisions, patterns, tools) are durable
+# knowledge; they decay only when they are BOTH never-recalled and orphaned
+# AND far older than the episodic cutoff. This multiplier sets that margin.
+SEMANTIC_AGE_MULT = 3
+
+
+def _normalize_link_target(link: str) -> str:
+    """Reduce a wikilink to its bare target (drop |alias and #heading)."""
+    return str(link).split("|", 1)[0].split("#", 1)[0].strip().lower()
+
+
+def _inbound_wikilink_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Count, per link target, how many notes point at it.
+
+    Targets are matched later against a note's filename stem and title, so an
+    "orphan" (count 0) is a note nothing else references — a safer decay
+    candidate than one woven into the knowledge graph.
+    """
+    counts: dict[str, int] = {}
+    for row in conn.execute("SELECT wikilinks FROM notes"):
+        try:
+            links = json.loads(row["wikilinks"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            links = []
+        for link in links:
+            target = _normalize_link_target(link)
+            if target:
+                counts[target] = counts.get(target, 0) + 1
+    return counts
+
+
+def _archive_one(vault_path: str, conn: sqlite3.Connection, row: sqlite3.Row, reason: str) -> str:
+    """Move one note into archive/, flag its frontmatter, repoint its row.
+
+    Never deletes. The file is relocated to <vault>/archive/<relpath> and its
+    frontmatter gains status/archived_at/archived_reason. The DB row is
+    repointed and flagged 'archived' so search_vault's status filter hides it.
+    Returns the new relative path.
+    """
+    abs_src = os.path.abspath(os.path.join(vault_path, row["filepath"]))
+    if not _path_in_vault(vault_path, abs_src) or not os.path.exists(abs_src):
+        raise FileNotFoundError(f"archive source missing or outside vault: {row['filepath']}")
+
+    dest_rel = os.path.join("archive", row["filepath"])
+    abs_dest = os.path.abspath(os.path.join(vault_path, dest_rel))
+    if not _path_in_vault(vault_path, abs_dest):
+        raise ValueError(f"archive destination escapes vault: {dest_rel}")
+
+    with open(abs_src, "r", encoding="utf-8") as f:
+        content = f.read()
+    meta, body = parse_frontmatter(content)
+    meta["status"] = "archived"
+    meta["archived_at"] = datetime.now().isoformat(timespec="seconds")
+    meta["archived_reason"] = reason
+    new_content = build_frontmatter(meta) + "\n\n" + body.lstrip("\n")
+
+    os.makedirs(os.path.dirname(abs_dest), exist_ok=True)
+    with open(abs_dest, "w", encoding="utf-8") as f:
+        f.write(new_content)
+    os.remove(abs_src)
+
+    conn.execute("UPDATE notes SET filepath=?, status='archived' WHERE id=?", (dest_rel, row["id"]))
+    return dest_rel
+
+
+def archive_stale_notes(vault_path: str, days: int = 90, apply: bool = False, limit: int = 200) -> dict:
+    """Tier-aware decay: surface (and optionally archive) cold notes.
+
+    Eligibility:
+      - episodic (debug, daily-log): cold for `days` (by last_recalled, else
+        created).
+      - semantic / procedural: stricter — never recalled AND created older than
+        `days * SEMANTIC_AGE_MULT` AND orphaned (no inbound wikilinks).
+
+    apply=False (default) is a dry run: returns what WOULD be archived without
+    touching disk. apply=True relocates eligible notes into archive/ under a
+    single VaultLock and flags them. Never deletes.
+
+    Returns {"dry_run", "days", "candidates", "archived"}.
+    """
+    now = datetime.now()
+    episodic_cutoff = (now - timedelta(days=days)).isoformat(timespec="seconds")
+    semantic_cutoff = (now - timedelta(days=days * SEMANTIC_AGE_MULT)).isoformat(timespec="seconds")
+
+    def _select(conn: sqlite3.Connection) -> list[tuple[sqlite3.Row, str]]:
+        inbound = _inbound_wikilink_counts(conn)
+        rows = conn.execute(
+            "SELECT id, filepath, title, type, tier, project, created, "
+            "last_recalled, COALESCE(recall_count, 0) AS recall_count, status "
+            "FROM notes "
+            "WHERE status IS NULL OR status NOT IN ('archived', 'superseded')"
+        ).fetchall()
+        out: list[tuple[sqlite3.Row, str]] = []
+        for row in rows:
+            tier = row["tier"] or derive_tier(row["type"])
+            created = row["created"] or ""
+            ref = row["last_recalled"] or created
+            if not ref:
+                continue  # unknown age → never auto-archive (fail safe)
+            if tier == "episodic":
+                if ref < episodic_cutoff:
+                    out.append((row, f"episodic note cold since {ref[:10]}"))
+            else:
+                stem = os.path.splitext(os.path.basename(row["filepath"]))[0].lower()
+                title_key = (row["title"] or "").lower()
+                inbound_n = inbound.get(stem, 0) + inbound.get(title_key, 0)
+                if row["recall_count"] == 0 and created and created < semantic_cutoff and inbound_n == 0:
+                    out.append((row, f"{tier} note never recalled, orphaned, older than {days * SEMANTIC_AGE_MULT}d"))
+            if len(out) >= limit:
+                break
+        return out
+
+    if not apply:
+        conn = init_db(vault_path)
+        try:
+            selected = _select(conn)
+            candidates = [
+                {
+                    "id": r["id"],
+                    "filepath": r["filepath"],
+                    "title": r["title"],
+                    "tier": r["tier"] or derive_tier(r["type"]),
+                    "reason": reason,
+                }
+                for r, reason in selected
+            ]
+        finally:
+            conn.close()
+        return {"dry_run": True, "days": days, "candidates": candidates, "archived": []}
+
+    archived: list[dict] = []
+    with VaultLock(vault_path):
+        conn = init_db(vault_path)
+        try:
+            for row, reason in _select(conn):
+                try:
+                    dest = _archive_one(vault_path, conn, row, reason)
+                    archived.append(
+                        {"id": row["id"], "from": row["filepath"], "to": dest, "title": row["title"], "reason": reason}
+                    )
+                except (OSError, ValueError) as e:
+                    memo_log(vault_path, f"archive failed for {row['filepath']}: {e}", "error")
+            conn.commit()
+        finally:
+            conn.close()
+    return {"dry_run": False, "days": days, "candidates": [], "archived": archived}
+
+
 def reindex_vault(vault_path: str, full: bool = True):
     """Reindex vault. Full mode drops everything; incremental uses content_hash.
 
@@ -1612,6 +1770,7 @@ def main():
             "list",
             "stats",
             "stale",
+            "decay",
             "reindex",
             "warm-up",
             "obsidian-info",
@@ -1625,6 +1784,7 @@ def main():
     parser.add_argument(
         "--incremental", action="store_true", help="Incremental reindex: only changed files (default for cron)"
     )
+    parser.add_argument("--apply", action="store_true", help="`decay`: actually archive notes (default is a dry run)")
 
     args = parser.parse_args()
     vault = os.path.expanduser(args.vault) if args.vault else ""
@@ -1701,6 +1861,10 @@ def main():
     elif args.command == "stale":
         rows = find_stale_notes(vault, days=args.days, limit=args.limit)
         print(json.dumps(rows, indent=2, ensure_ascii=False))
+
+    elif args.command == "decay":
+        report = archive_stale_notes(vault, days=args.days, apply=args.apply)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
 
     elif args.command == "reindex":
         with VaultLock(vault):
