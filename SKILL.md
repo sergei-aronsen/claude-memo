@@ -9,7 +9,7 @@ description: >
   of wanting to persist knowledge. Also trigger for "/memo find", "/memo search",
   "что я решал по X", "find in vault", "search vault", "найди в базе" to search
   notes — both keyword and semantic. Trigger for "/memo dedup", "/memo stats",
-  "/memo project", "/memo reindex". This is the bridge between Claude Code
+  "/memo project", "/memo reindex", "/memo decay". This is the bridge between Claude Code
   sessions and long-term engineering memory across all projects.
 ---
 
@@ -344,6 +344,22 @@ Run weekly to keep the vault clean. Pairs well with `/memo dedup`.
 
 ---
 
+### `/memo decay` — Archive notes that have aged out
+
+```bash
+python scripts/memo_engine.py decay --vault <vault_path> [--days 90] [--apply]
+```
+
+Tier-aware auto-forget. Episodic notes (debug logs) decay at `--days`;
+semantic/procedural knowledge (decisions, patterns) only when never
+recalled, orphaned (no inbound wikilinks), and far older. Dry-run by
+default — add `--apply` to actually move notes into `archive/` and flag
+their frontmatter. **Never deletes**; archived notes drop out of search
+but stay on disk (reversible). Opt out of auto-supersede on save with
+`MEMO_AUTO_SUPERSEDE=0`; enable LLM query expansion with `MEMO_QUERY_EXPANSION=1`.
+
+---
+
 ### `/memo query {question}` — Ask your vault (LLM-synthesized)
 
 ```bash
@@ -606,6 +622,7 @@ Cursor, Windsurf, Cline.
 | `memo_lint` | 7 health checks on vault |
 | `memo_trace` | Evolution of a concept over time (chronological) |
 | `memo_find_duplicates` | Find semantically similar notes |
+| `memo_decay` | Surface/archive notes that have aged out (tier-aware, dry-run default) |
 
 ### Install dependency
 
