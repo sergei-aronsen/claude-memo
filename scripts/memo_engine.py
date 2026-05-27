@@ -994,6 +994,86 @@ def find_contradictions(
         conn.close()
 
 
+def _mark_superseded(vault_path: str, conn: sqlite3.Connection, older: sqlite3.Row, new_title: str) -> bool:
+    """Flag an older note as superseded by a newer one (reversible)."""
+    abs_path = os.path.abspath(os.path.join(vault_path, older["filepath"]))
+    if not _path_in_vault(vault_path, abs_path) or not os.path.exists(abs_path):
+        return False
+    with open(abs_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    meta, body = parse_frontmatter(content)
+    link = f"[[{new_title}]]"
+    meta["status"] = "superseded"
+    meta["superseded_by"] = link
+    with open(abs_path, "w", encoding="utf-8") as f:
+        f.write(build_frontmatter(meta) + "\n\n" + body.lstrip("\n"))
+    conn.execute("UPDATE notes SET status='superseded', superseded_by=? WHERE id=?", (link, older["id"]))
+    return True
+
+
+def detect_supersede(
+    note_id: int,
+    vault_path: str,
+    conn: sqlite3.Connection,
+    store: EmbeddingsStore,
+    sim_floor: float = 0.90,
+) -> list[str]:
+    """Mark older notes that the freshly-saved note `note_id` contradicts.
+
+    Conservative on purpose — auto-marking hides a note from default search,
+    so it fires only when ALL hold:
+      * cosine(new, old) >= sim_floor (same topic) and < 0.999 (not an exact
+        duplicate — those belong to the dedup flow),
+      * the two notes carry OPPOSITE polarity markers,
+      * the other note is strictly OLDER (by created).
+    Returns titles of notes marked superseded. Reversible via frontmatter.
+    """
+    if store.embeddings is None:
+        return []
+    idx = store._id_index.get(note_id)
+    if idx is None or idx >= len(store.embeddings):
+        return []
+
+    new_row = conn.execute("SELECT id, title, body, created FROM notes WHERE id = ?", (note_id,)).fetchone()
+    if not new_row:
+        return []
+    new_pol = _polarity(f"{new_row['title']}\n{new_row['body'] or ''}")
+    if new_pol is None:
+        return []  # cannot judge a contradiction without a clear polarity
+    new_created = new_row["created"] or ""
+
+    emb = store.embeddings
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1, norms)
+    normalized = emb / norms
+    sims = normalized @ normalized[idx]
+
+    superseded: list[str] = []
+    for j in range(len(sims)):
+        if j == idx:
+            continue
+        sim = float(sims[j])
+        if sim < sim_floor or sim >= 0.999:
+            continue
+        other_id = int(store.id_map[j])
+        row = conn.execute(
+            "SELECT id, filepath, title, body, created, status FROM notes WHERE id = ?", (other_id,)
+        ).fetchone()
+        if not row or row["status"] in ("archived", "superseded"):
+            continue
+        other_pol = _polarity(f"{row['title']}\n{row['body'] or ''}")
+        if other_pol is None or other_pol == new_pol:
+            continue
+        if (row["created"] or "") >= new_created:
+            continue  # only supersede strictly older knowledge
+        if _mark_superseded(vault_path, conn, row, new_row["title"]):
+            superseded.append(row["title"])
+
+    if superseded:
+        conn.commit()
+    return superseded
+
+
 def list_notes(vault_path: str, limit: int = 10):
     """List recent notes."""
     conn = init_db(vault_path)

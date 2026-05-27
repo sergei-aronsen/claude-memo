@@ -416,6 +416,88 @@ def test_archived_status_survives_full_reindex(tmp_vault, isolated_home):
     assert row is not None and row["status"] == "archived"
 
 
+def test_detect_supersede_marks_older_opposite_note(tmp_vault, isolated_home):
+    """A newer note that contradicts an older one marks the older superseded."""
+    from memo_engine import EmbeddingsStore, detect_supersede, init_db
+    from memo_utils import save_memo_and_index
+
+    old = save_memo_and_index(
+        {"type": "decision", "title": "Use X in production", "content": "works great, recommended"},
+        tmp_vault,
+        source="t",
+    )
+    new = save_memo_and_index(
+        {"type": "decision", "title": "Stop using X", "content": "broken and deprecated, do not use"},
+        tmp_vault,
+        source="t",
+    )
+    assert old and new
+
+    conn = init_db(tmp_vault)
+    conn.execute("UPDATE notes SET created = '2020-01-01' WHERE title = ?", ("Use X in production",))
+    conn.execute("UPDATE notes SET created = '2026-01-01' WHERE title = ?", ("Stop using X",))
+    conn.commit()
+    ids = {r["title"]: r["id"] for r in conn.execute("SELECT id, title FROM notes")}
+    old_id, new_id = ids["Use X in production"], ids["Stop using X"]
+
+    # Drive the two embeddings into the supersede band (cos ~0.90).
+    store = EmbeddingsStore(tmp_vault)
+    assert store.embeddings is not None
+    dim = store.embeddings.shape[1]
+    base = np.ones(dim, dtype="float32")
+    base /= np.linalg.norm(base)
+    near = np.ones(dim, dtype="float32")
+    near[:20] = -1.0
+    near /= np.linalg.norm(near)
+    store.embeddings[store._id_index[old_id]] = base
+    store.embeddings[store._id_index[new_id]] = near
+    store._save()
+
+    superseded = detect_supersede(new_id, tmp_vault, conn, store, sim_floor=0.85)
+    assert "Use X in production" in superseded
+
+    row = conn.execute("SELECT status, superseded_by FROM notes WHERE id = ?", (old_id,)).fetchone()
+    conn.close()
+    assert row["status"] == "superseded"
+    assert "Stop using X" in (row["superseded_by"] or "")
+
+
+def test_detect_supersede_spares_newer_and_same_polarity(tmp_vault, isolated_home):
+    """Never supersede a newer note, and never on same/absent polarity."""
+    from memo_engine import EmbeddingsStore, detect_supersede, init_db
+    from memo_utils import save_memo_and_index
+
+    a = save_memo_and_index(
+        {"type": "decision", "title": "Approach A works", "content": "great and recommended"},
+        tmp_vault,
+        source="t",
+    )
+    b = save_memo_and_index(
+        {"type": "decision", "title": "Approach A also works", "content": "great and solid too"},
+        tmp_vault,
+        source="t",
+    )
+    assert a and b
+
+    conn = init_db(tmp_vault)
+    ids = {r["title"]: r["id"] for r in conn.execute("SELECT id, title FROM notes")}
+    store = EmbeddingsStore(tmp_vault)
+    dim = store.embeddings.shape[1]
+    vec = np.ones(dim, dtype="float32")
+    vec /= np.linalg.norm(vec)
+    near = np.ones(dim, dtype="float32")
+    near[:20] = -1.0
+    near /= np.linalg.norm(near)
+    store.embeddings[store._id_index[ids["Approach A works"]]] = vec
+    store.embeddings[store._id_index[ids["Approach A also works"]]] = near
+    store._save()
+
+    # Same polarity (both positive) → no supersede even in-band.
+    superseded = detect_supersede(ids["Approach A also works"], tmp_vault, conn, store, sim_floor=0.85)
+    conn.close()
+    assert superseded == []
+
+
 def test_find_duplicates_threshold(tmp_vault, isolated_home):
     """Identical embed_text (title + tags + body) → cos sim 1.0 → dup pair returned."""
     from memo_engine import find_duplicates

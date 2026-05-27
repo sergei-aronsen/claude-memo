@@ -880,7 +880,7 @@ def save_memo_and_index(
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
 
-    from memo_engine import EmbeddingsStore, VaultLock, index_file, init_db
+    from memo_engine import EmbeddingsStore, VaultLock, detect_supersede, index_file, init_db
 
     with VaultLock(vault_path):
         filepath = save_memo(memo, vault_path, session_id=session_id, source=source)
@@ -890,7 +890,18 @@ def save_memo_and_index(
             conn = init_db(vault_path)
             store = EmbeddingsStore(vault_path)
             try:
-                index_file(filepath, vault_path, conn, store)
+                note_id = index_file(filepath, vault_path, conn, store)
+                # F3: auto-supersede older contradicting notes (opt-out via
+                # MEMO_AUTO_SUPERSEDE=0). Conservative — only fires on a
+                # high-confidence opposite-polarity match against an older note.
+                if note_id is not None and os.environ.get("MEMO_AUTO_SUPERSEDE", "1") != "0":
+                    superseded = detect_supersede(note_id, vault_path, conn, store)
+                    if superseded:
+                        memo_log(
+                            vault_path,
+                            f"auto-superseded {len(superseded)} note(s) by '{memo.get('title')}': {superseded}",
+                            "info",
+                        )
             finally:
                 conn.close()
         except Exception as e:
