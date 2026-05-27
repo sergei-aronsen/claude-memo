@@ -329,6 +329,93 @@ def test_search_excludes_archived_and_superseded(tmp_vault, isolated_home):
     assert "Dead Note" in titles_all
 
 
+def test_archive_episodic_dry_run_then_apply(tmp_vault, isolated_home):
+    """Dry run reports without touching disk; apply moves the file + hides it."""
+    from memo_engine import archive_stale_notes, init_db, search_vault
+    from memo_utils import save_memo_and_index
+
+    fp = save_memo_and_index(
+        {"type": "debug", "title": "Old Crash", "content": "segfault zarp"},
+        tmp_vault,
+        source="t",
+    )
+    assert fp is not None
+
+    conn = init_db(tmp_vault)
+    conn.execute("UPDATE notes SET created = '2020-01-01' WHERE title = ?", ("Old Crash",))
+    conn.commit()
+    conn.close()
+
+    dry = archive_stale_notes(tmp_vault, days=30, apply=False)
+    assert dry["dry_run"] is True
+    assert any(c["title"] == "Old Crash" for c in dry["candidates"])
+    assert dry["archived"] == []
+    assert os.path.exists(fp), "dry run must not touch disk"
+
+    applied = archive_stale_notes(tmp_vault, days=30, apply=True)
+    assert any(a["title"] == "Old Crash" for a in applied["archived"])
+    assert not os.path.exists(fp), "file must be relocated"
+    assert os.path.isdir(os.path.join(tmp_vault, "archive")), "archive/ must exist"
+
+    titles = {r["title"] for r in search_vault("segfault", tmp_vault, track_recall=False)}
+    assert "Old Crash" not in titles, "archived note must be excluded from search"
+
+
+def test_archive_spares_linked_semantic_note(tmp_vault, isolated_home):
+    """A semantic note that other notes wikilink to is NOT a decay candidate."""
+    from memo_engine import archive_stale_notes, init_db
+    from memo_utils import save_memo_and_index
+
+    save_memo_and_index(
+        {"type": "decision", "title": "Keep Me", "content": "important choice"},
+        tmp_vault,
+        source="t",
+    )
+    save_memo_and_index(
+        {"type": "insight", "title": "Linker", "content": "see [[Keep Me]] for the rationale"},
+        tmp_vault,
+        source="t",
+    )
+
+    conn = init_db(tmp_vault)
+    conn.execute("UPDATE notes SET created = '2018-01-01', recall_count = 0 WHERE title = ?", ("Keep Me",))
+    conn.commit()
+    conn.close()
+
+    report = archive_stale_notes(tmp_vault, days=30, apply=False)
+    titles = {c["title"] for c in report["candidates"]}
+    assert "Keep Me" not in titles, "linked (non-orphan) semantic note must be spared"
+
+
+def test_archived_status_survives_full_reindex(tmp_vault, isolated_home):
+    """status='archived' is persisted to frontmatter so a full rebuild keeps it."""
+    from memo_engine import VaultLock, archive_stale_notes, init_db, reindex_vault, search_vault
+    from memo_utils import save_memo_and_index
+
+    save_memo_and_index(
+        {"type": "debug", "title": "Reindex Ghost", "content": "phantom flob"},
+        tmp_vault,
+        source="t",
+    )
+    conn = init_db(tmp_vault)
+    conn.execute("UPDATE notes SET created = '2020-01-01' WHERE title = ?", ("Reindex Ghost",))
+    conn.commit()
+    conn.close()
+
+    archive_stale_notes(tmp_vault, days=30, apply=True)
+
+    with VaultLock(tmp_vault):
+        reindex_vault(tmp_vault, full=True)
+
+    titles = {r["title"] for r in search_vault("phantom", tmp_vault, track_recall=False)}
+    assert "Reindex Ghost" not in titles, "archived status must survive full reindex"
+
+    conn = init_db(tmp_vault)
+    row = conn.execute("SELECT status FROM notes WHERE title = ?", ("Reindex Ghost",)).fetchone()
+    conn.close()
+    assert row is not None and row["status"] == "archived"
+
+
 def test_find_duplicates_threshold(tmp_vault, isolated_home):
     """Identical embed_text (title + tags + body) → cos sim 1.0 → dup pair returned."""
     from memo_engine import find_duplicates
