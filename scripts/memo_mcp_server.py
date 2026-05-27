@@ -53,7 +53,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402 — import after sys.path.i
 
 mcp = FastMCP(
     "Memo",
-    description=(
+    instructions=(
         "Persistent engineering memory with semantic search. "
         "Search decisions, patterns, debug solutions, and insights "
         "across all projects from a single Obsidian vault."
