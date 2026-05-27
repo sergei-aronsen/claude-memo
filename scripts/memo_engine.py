@@ -207,6 +207,11 @@ def init_db(vault_path: str) -> sqlite3.Connection:
         "ALTER TABLE notes ADD COLUMN last_recalled TEXT",
         "ALTER TABLE notes ADD COLUMN recall_count INTEGER DEFAULT 0",
         "ALTER TABLE notes ADD COLUMN tier TEXT",
+        # Lifecycle state: NULL/'active' = live; 'archived' = decayed out
+        # (F1); 'superseded' = replaced by a newer contradicting note (F3).
+        # superseded_by holds the wikilink to the replacement note.
+        "ALTER TABLE notes ADD COLUMN status TEXT",
+        "ALTER TABLE notes ADD COLUMN superseded_by TEXT",
     ):
         try:
             conn.execute(stmt)
@@ -548,12 +553,52 @@ def index_file(filepath: str, vault_path: str, conn: sqlite3.Connection, store: 
 RRF_K = 60
 
 
+def _diversify_by_project(
+    ordered: list[tuple[int, float, float, float]],
+    meta_by_id: dict[int, sqlite3.Row],
+    limit: int,
+    max_per_project: int,
+) -> list[tuple[int, float, float, float]]:
+    """Greedy selection capping how many head results share one project.
+
+    `ordered` is RRF-sorted (best first). Walk it taking items while each
+    project stays under `max_per_project`; defer the rest. If fewer than
+    `limit` items pass the cap, backfill from the deferred list (still
+    best-first) so diversification never returns FEWER results than plain
+    ranking — it only reorders to surface more sources near the top.
+
+    Cross-project notes (falsy project) are never capped: they are
+    genuinely distinct, so collapsing them under one bucket would wrongly
+    starve them.
+    """
+    selected: list[tuple[int, float, float, float]] = []
+    deferred: list[tuple[int, float, float, float]] = []
+    per_project: dict[str, int] = {}
+    for item in ordered:
+        project = meta_by_id[item[0]]["project"]
+        if not project or per_project.get(project, 0) < max_per_project:
+            selected.append(item)
+            if project:
+                per_project[project] = per_project.get(project, 0) + 1
+            if len(selected) >= limit:
+                return selected
+        else:
+            deferred.append(item)
+    for item in deferred:
+        if len(selected) >= limit:
+            break
+        selected.append(item)
+    return selected[:limit]
+
+
 def search_vault(
     query: str,
     vault_path: str,
     limit: int = 10,
     threshold: float = 0.0,
     track_recall: bool = True,
+    max_per_project: int | None = 3,
+    include_superseded: bool = False,
 ):
     """Hybrid semantic + keyword search ranked via Reciprocal Rank Fusion.
 
@@ -568,6 +613,11 @@ def search_vault(
     `threshold` filters candidates by raw semantic score (cosine, 0-1)
     before fusion, preserving the prior "minimum relevance" gate for
     existing call sites that pass threshold=0.3.
+
+    `max_per_project` caps how many head results come from one project so a
+    single noisy project cannot crowd out the rest (set None to disable).
+    `include_superseded` keeps notes marked archived/superseded in results
+    (default excludes them — see F1/F3).
     """
     conn = init_db(vault_path)
     try:
@@ -635,29 +685,50 @@ def search_vault(
             scored.append((note_id, rrf, c["semantic_score"], c["keyword_score"]))
 
         scored.sort(key=lambda x: x[1], reverse=True)
-        scored = scored[:limit]
 
-        # 4. Fetch note metadata
+        # 4. Fetch metadata for a pool (a few × limit) in one query so
+        # diversification has alternatives to swap in. When diversification
+        # is off we still pool > limit because some candidates get dropped
+        # by the status filter below and we must be able to backfill.
+        pool = scored[: max(limit * 4, limit)]
+        pool_ids = [s[0] for s in pool]
+        meta_by_id: dict[int, sqlite3.Row] = {}
+        if pool_ids:
+            ph = ",".join("?" * len(pool_ids))
+            for row in conn.execute(
+                f"SELECT id, filepath, title, type, project, tags, created, status "  # nosec B608
+                f"FROM notes WHERE id IN ({ph})",
+                pool_ids,
+            ).fetchall():
+                # Exclude archived / superseded notes from default results.
+                if not include_superseded and row["status"] in ("archived", "superseded"):
+                    continue
+                meta_by_id[row["id"]] = row
+
+        ordered = [(s[0], s[1], s[2], s[3]) for s in pool if s[0] in meta_by_id]
+        if max_per_project is not None:
+            ordered = _diversify_by_project(ordered, meta_by_id, limit, max_per_project)
+        else:
+            ordered = ordered[:limit]
+
+        # 5. Build result rows from the already-fetched metadata.
         output = []
-        for note_id, rrf_score, sem, kw in scored:
-            row = conn.execute(
-                "SELECT filepath, title, type, project, tags, created FROM notes WHERE id = ?", (note_id,)
-            ).fetchone()
-            if row:
-                output.append(
-                    {
-                        "id": note_id,
-                        "filepath": row["filepath"],
-                        "title": row["title"],
-                        "type": row["type"],
-                        "project": row["project"],
-                        "tags": row["tags"],
-                        "created": row["created"],
-                        "score": round(rrf_score, 4),
-                        "semantic": round(sem, 3),
-                        "keyword": round(kw, 3),
-                    }
-                )
+        for note_id, rrf_score, sem, kw in ordered:
+            row = meta_by_id[note_id]
+            output.append(
+                {
+                    "id": note_id,
+                    "filepath": row["filepath"],
+                    "title": row["title"],
+                    "type": row["type"],
+                    "project": row["project"],
+                    "tags": row["tags"],
+                    "created": row["created"],
+                    "score": round(rrf_score, 4),
+                    "semantic": round(sem, 3),
+                    "keyword": round(kw, 3),
+                }
+            )
 
         # 5. Recall tracking: stamp the returned hits with the current
         # timestamp and bump their counter in one statement. Used later
