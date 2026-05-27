@@ -72,13 +72,20 @@ New `archive_stale_notes(vault_path, days=90, apply=False, limit=200)` in
   separate from user query), search each, merge by note_id keeping max RRF.
 - Reuses the existing provider client + SSRF allowlist.
 
-### F5 — Hooks (+ targeted, not noisy)
+### F5 — Hooks — DROPPED (decision recorded during implementation)
 
-- Add **SubagentStop** capture only — reuses the existing auto-memo
-  classification pipeline (high signal, low frequency).
-- Explicitly **reject** raw `PostToolUse` capture: claude-memo writes curated
-  markdown notes; per-tool capture would flood the vault. agentmemory's "12
-  hooks" work because it captures to cheap KV with dedup + later consolidation.
+Original plan: add a targeted **SubagentStop** capture hook.
+
+Dropped after inspecting `auto_memo_hook.sh`: the SessionEnd pipeline
+**deliberately suppresses subagent events** (size-gate `< 2048 bytes → exit
+0`, documented in the script) because subagent transcripts are low-signal
+noise for a curated-markdown vault. Adding a SubagentStop capture hook would
+reverse that explicit design choice for marginal solo value, and would
+require editing global `~/.claude/settings.json` (config-change caution).
+
+Raw `PostToolUse` capture was already rejected in the design for the same
+flood-the-vault reason. Net: F5 is intentionally not implemented; capture
+stays high-signal. Re-add only if multi-agent capture becomes a real need.
 
 ## Quality bar
 
