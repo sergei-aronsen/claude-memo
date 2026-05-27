@@ -271,6 +271,64 @@ def test_find_contradictions_flags_opposed_polarity(tmp_vault, isolated_home, mo
     init_db(tmp_vault).close()
 
 
+def test_search_diversifies_by_project(tmp_vault, isolated_home):
+    """max_per_project caps how many head hits come from one project."""
+    from memo_engine import search_vault
+    from memo_utils import save_memo_and_index
+
+    # 4 notes in project A, 4 in project B, all sharing a keyword so FTS
+    # makes every one a candidate.
+    for i in range(4):
+        save_memo_and_index(
+            {"type": "insight", "title": f"A note {i}", "project": "proj-a", "content": "zephyr alpha"},
+            tmp_vault,
+            source="t",
+        )
+        save_memo_and_index(
+            {"type": "insight", "title": f"B note {i}", "project": "proj-b", "content": "zephyr beta"},
+            tmp_vault,
+            source="t",
+        )
+
+    results = search_vault("zephyr", tmp_vault, limit=4, max_per_project=2, track_recall=False)
+    projects = [r["project"] for r in results]
+    assert len(results) == 4
+    assert projects.count("proj-a") <= 2
+    assert projects.count("proj-b") <= 2
+
+
+def test_search_excludes_archived_and_superseded(tmp_vault, isolated_home):
+    """Notes flagged archived/superseded must not appear in default results."""
+    from memo_engine import init_db, search_vault
+    from memo_utils import save_memo_and_index
+
+    save_memo_and_index(
+        {"type": "insight", "title": "Dead Note", "content": "quokka facts"},
+        tmp_vault,
+        source="t",
+    )
+    save_memo_and_index(
+        {"type": "insight", "title": "Live Note", "content": "quokka facts"},
+        tmp_vault,
+        source="t",
+    )
+
+    conn = init_db(tmp_vault)
+    conn.execute("UPDATE notes SET status = 'archived' WHERE title = ?", ("Dead Note",))
+    conn.commit()
+    conn.close()
+
+    titles = {r["title"] for r in search_vault("quokka", tmp_vault, limit=10, track_recall=False)}
+    assert "Live Note" in titles
+    assert "Dead Note" not in titles
+
+    # include_superseded=True surfaces it again.
+    titles_all = {
+        r["title"] for r in search_vault("quokka", tmp_vault, limit=10, track_recall=False, include_superseded=True)
+    }
+    assert "Dead Note" in titles_all
+
+
 def test_find_duplicates_threshold(tmp_vault, isolated_home):
     """Identical embed_text (title + tags + body) → cos sim 1.0 → dup pair returned."""
     from memo_engine import find_duplicates
