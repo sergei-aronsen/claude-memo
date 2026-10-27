@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `status` + `superseded_by` columns (additive migration); lifecycle state is
   persisted to frontmatter so it survives a full reindex.
 
+### Security
+
+- **Embedding stack upgraded out of known advisories** — `sentence-transformers`
+  `>=5.6,<6` (was `<3.5`) and an explicit `transformers>=5.10` floor (was 4.57).
+  This clears the seven open `pip-audit` findings and lets CI drop its two
+  `--ignore-vuln` suppressions. `multilingual-e5-large` embeddings are unchanged
+  (max element difference 1.3e-7 against 3.4.1), so existing vectors stay valid.
+
 ### Notes
 
 - Considered porting agentmemory's broad auto-capture hooks (PostToolUse /
