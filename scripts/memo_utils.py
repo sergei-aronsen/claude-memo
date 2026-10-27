@@ -293,7 +293,7 @@ PROVIDER_DEFAULTS = {
     "anthropic": {
         "url": "https://api.anthropic.com/v1/messages",
         "model": "claude-haiku-4-5-20251001",
-        "fallback_model": "claude-sonnet-4-6-20250514",
+        "fallback_model": "claude-sonnet-4-6",
         "key_env": "ANTHROPIC_API_KEY",
     },
 }

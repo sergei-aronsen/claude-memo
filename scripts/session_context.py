@@ -221,7 +221,14 @@ def main():
 
     context = load_project_context(vault_path, project_name)
     if context:
-        output = {"additionalContext": context}
+        # Claude Code only injects context from hookSpecificOutput
+        # (or plain-text stdout); a top-level key is silently dropped.
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        }
         print(json.dumps(output))
 
     sys.exit(0)
