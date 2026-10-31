@@ -1,23 +1,22 @@
 version: 2
-updates:
 
+# One pull request a month with every update, majors included, across all
+# ecosystems below. A weekly stream of per-ecosystem pull requests got
+# superseded before anyone merged it and only produced notification noise.
+multi-ecosystem-groups:
+  all-dependencies:
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "deps"
+
+updates:
   - package-ecosystem: "github-actions"
     directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "ci(deps)"
+    patterns: ["*"]
+    multi-ecosystem-group: "all-dependencies"
 
   - package-ecosystem: "pip"
     directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "deps(root)"
-    groups:
-      minor-and-patch:
-        update-types: ["minor", "patch"]
+    patterns: ["*"]
+    multi-ecosystem-group: "all-dependencies"
