@@ -582,3 +582,85 @@ def test_find_duplicates_threshold(tmp_vault, isolated_home):
     flat = {t for pair in pairs for t in (pair["title_a"], pair["title_b"])}
     assert "Same Title" in flat
     assert all(p["similarity"] >= 0.99 for p in pairs)
+
+
+def _save_one(vault):
+    from memo_utils import save_memo_and_index
+
+    save_memo_and_index({"type": "debug", "title": "Fingerprint Note", "content": "vector body"}, vault, source="t")
+
+
+def test_index_meta_written_with_current_fingerprint(tmp_vault, isolated_home):
+    """The first save records which model and schema built the vectors."""
+    from memo_engine import current_index_fingerprint, index_compatibility, read_index_meta
+
+    _save_one(tmp_vault)
+
+    meta = read_index_meta(tmp_vault)
+    assert meta is not None
+    for k, v in current_index_fingerprint().items():
+        assert meta[k] == v
+    assert index_compatibility(tmp_vault)["compatible"] is True
+
+
+def test_model_change_refuses_to_mix_vectors(tmp_vault, isolated_home, monkeypatch):
+    """A different model must not append to an index built by the old one."""
+    import memo_engine
+    from memo_engine import EmbeddingsStore, IndexModelMismatch, search_vault
+
+    _save_one(tmp_vault)
+    monkeypatch.setattr(memo_engine, "MODEL_NAME", "some/other-model")
+
+    with pytest.raises(IndexModelMismatch, match="reindex"):
+        EmbeddingsStore(tmp_vault)
+    with pytest.raises(IndexModelMismatch):
+        search_vault("vector", tmp_vault, track_recall=False)
+    assert memo_engine.vault_stats(tmp_vault)["index"]["compatible"] is False
+
+
+def test_full_reindex_clears_mismatch(tmp_vault, isolated_home, monkeypatch):
+    """reindex --full rebuilds under the new model and reports no failures."""
+    import memo_engine
+    from memo_engine import VaultLock, index_compatibility, read_index_meta, reindex_vault
+
+    _save_one(tmp_vault)
+    monkeypatch.setattr(memo_engine, "MODEL_NAME", "some/other-model")
+
+    with VaultLock(tmp_vault):
+        assert reindex_vault(tmp_vault, full=True) == 0
+
+    assert read_index_meta(tmp_vault)["model"] == "some/other-model"
+    assert index_compatibility(tmp_vault)["compatible"] is True
+
+
+def test_legacy_index_without_meta_is_adopted(tmp_vault, isolated_home):
+    """An index from before fingerprints keeps working and gains a meta file."""
+    import os
+
+    from memo_engine import EmbeddingsStore, get_index_meta_path, read_index_meta
+
+    _save_one(tmp_vault)
+    os.remove(get_index_meta_path(tmp_vault))
+
+    store = EmbeddingsStore(tmp_vault)
+    assert store.embeddings is not None
+    store._save()
+    assert read_index_meta(tmp_vault) is not None
+
+
+def test_reindex_returns_failure_count(tmp_vault, isolated_home, monkeypatch):
+    """A file that fails to index is reported, not silently dropped."""
+    import memo_engine
+    from memo_engine import VaultLock, reindex_vault
+
+    _save_one(tmp_vault)
+    real_index_file = memo_engine.index_file
+
+    def flaky(path, *args, **kwargs):
+        if path.endswith(".md") and "fingerprint" in path.lower():
+            raise ValueError("boom")
+        return real_index_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(memo_engine, "index_file", flaky)
+    with VaultLock(tmp_vault):
+        assert reindex_vault(tmp_vault, full=True) == 1

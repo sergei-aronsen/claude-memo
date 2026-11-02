@@ -125,11 +125,14 @@ def memo_search(query: str, limit: int = 10) -> str:
         query: What to search for (natural language).
         limit: Max results to return (default 10).
     """
-    from memo_engine import search_vault
+    from memo_engine import IndexModelMismatch, search_vault
 
     limit = min(max(1, limit), MAX_LIMIT)
     vault = get_vault_path()
-    results = search_vault(query, vault, limit=limit, threshold=0.3)
+    try:
+        results = search_vault(query, vault, limit=limit, threshold=0.3)
+    except IndexModelMismatch as e:
+        return f"Search index needs a full rebuild: {e}"
 
     if not results:
         return "No results found. Try different search terms or call memo_stats() to verify the vault has content."
@@ -165,7 +168,7 @@ def memo_query(question: str) -> str:
     Args:
         question: Natural language question about past work.
     """
-    from memo_engine import query_vault
+    from memo_engine import IndexModelMismatch, query_vault
 
     # N-H-K: input size cap + rate limit.
     if len(question) > MAX_QUESTION_LENGTH:
@@ -176,7 +179,10 @@ def memo_query(question: str) -> str:
         return rate_err
 
     vault = get_vault_path()
-    return _truncate_response(query_vault(question, vault))
+    try:
+        return _truncate_response(query_vault(question, vault))
+    except IndexModelMismatch as e:
+        return f"Search index needs a full rebuild: {e}"
 
 
 @mcp.tool()

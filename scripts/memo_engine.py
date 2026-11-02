@@ -80,6 +80,20 @@ def encode_query(text: str) -> np.ndarray:
     return model.encode(f"query: {text}")
 
 
+# Bump whenever the way vectors are produced changes (prefixes, chunking,
+# normalisation) so indexes built the old way are detected as stale.
+EMBEDDING_SCHEMA_VERSION = 1
+
+
+class IndexModelMismatch(RuntimeError):
+    """The stored embeddings were built by a different model or schema."""
+
+
+def current_index_fingerprint() -> dict[str, Any]:
+    """What a compatible index must have been built with."""
+    return {"model": MODEL_NAME, "schema": EMBEDDING_SCHEMA_VERSION}
+
+
 # All cache paths now resolve through memo_utils.get_memo_dir(), which
 # returns ~/.cache/memo/<hash>/ and auto-migrates legacy <vault>/.memo/
 # on first call. See memo_utils for the migration design rationale.
@@ -95,6 +109,32 @@ def get_embeddings_path(vault_path: str) -> str:
 
 def get_id_map_path(vault_path: str) -> str:
     return os.path.join(get_memo_dir(vault_path), "id_map.json")
+
+
+def get_index_meta_path(vault_path: str) -> str:
+    return os.path.join(get_memo_dir(vault_path), "index_meta.json")
+
+
+def read_index_meta(vault_path: str) -> dict[str, Any] | None:
+    """Return the stored fingerprint, or None for an index that predates it."""
+    try:
+        with open(get_index_meta_path(vault_path)) as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def index_compatibility(vault_path: str) -> dict[str, Any]:
+    """Compare the stored fingerprint with the running model.
+
+    An index without a meta file was built before fingerprints existed;
+    it is treated as compatible and adopted on the next save.
+    """
+    stored = read_index_meta(vault_path)
+    expected = current_index_fingerprint()
+    compatible = stored is None or all(stored.get(k) == v for k, v in expected.items())
+    return {"compatible": compatible, "stored": stored, "expected": expected}
 
 
 def ensure_memo_dir(vault_path: str):
@@ -283,6 +323,15 @@ class EmbeddingsStore:
                 "Run `memo_engine.py reindex --vault {path} --full` to rebuild."
             )
 
+        if emb_exists:
+            compat = index_compatibility(self.vault_path)
+            if not compat["compatible"]:
+                raise IndexModelMismatch(
+                    f"Search index was built with {compat['stored']}, "
+                    f"but the engine now uses {compat['expected']}. Old and new "
+                    "vectors cannot be mixed. Run `memo_engine.py reindex --vault <path> --full`."
+                )
+
         if emb_exists and map_exists:
             # Do NOT take LOCK_SH on the vault lock file here. The previous
             # version did, intending to block readers while a writer mid-saved.
@@ -346,6 +395,24 @@ class EmbeddingsStore:
             if os.path.exists(self.emb_path):
                 os.remove(self.emb_path)
         os.replace(map_tmp, self.map_path)
+        self._write_meta()
+
+    def _write_meta(self):
+        """Record the fingerprint; _load has already refused a mismatched index."""
+        meta_path = get_index_meta_path(self.vault_path)
+        meta = dict(current_index_fingerprint())
+        try:
+            from importlib.metadata import version
+
+            meta["sentence_transformers"] = version("sentence-transformers")  # diagnostics only
+        except ImportError:  # PackageNotFoundError subclasses it
+            pass
+        if read_index_meta(self.vault_path) == meta:
+            return
+        tmp = meta_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(meta, f)
+        os.replace(tmp, meta_path)
 
     def add(self, note_id: int, embedding: np.ndarray, defer_save: bool = False):
         """Add or update embedding for a note.
@@ -1266,6 +1333,7 @@ def vault_stats(vault_path: str):
             "by_project": [(dict(r)["project"], dict(r)["c"]) for r in by_project],
             "most_connected": link_counts[:10],
             "top_tags": sorted(tag_freq.items(), key=lambda x: x[1], reverse=True)[:15],
+            "index": index_compatibility(vault_path),
             "recall": {
                 "recalled": recall_row["recalled"] if recall_row else 0,
                 "never_recalled": recall_row["never_recalled"] if recall_row else 0,
@@ -1451,7 +1519,7 @@ def archive_stale_notes(vault_path: str, days: int = 90, apply: bool = False, li
     return {"dry_run": False, "days": days, "candidates": [], "archived": archived}
 
 
-def reindex_vault(vault_path: str, full: bool = True):
+def reindex_vault(vault_path: str, full: bool = True) -> int:
     """Reindex vault. Full mode drops everything; incremental uses content_hash.
 
     Incremental mode (full=False):
@@ -1462,13 +1530,17 @@ def reindex_vault(vault_path: str, full: bool = True):
 
     Full mode (full=True):
       - Drops and rebuilds entire index
-      - Use after manual bulk edits or index corruption
+      - Use after manual bulk edits, index corruption or a model change
+      - Note: also resets recall stats (recall_count, last_recalled)
+
+    Returns the number of files that failed to index (0 = complete).
     """
     if full:
         db_path = get_db_path(vault_path)
         emb_path = get_embeddings_path(vault_path)
         map_path = get_id_map_path(vault_path)
-        for p in [db_path, emb_path, map_path]:
+        meta_path = get_index_meta_path(vault_path)
+        for p in [db_path, emb_path, map_path, meta_path]:
             if os.path.exists(p):
                 os.remove(p)
 
@@ -1553,6 +1625,7 @@ def reindex_vault(vault_path: str, full: bool = True):
             print(f"    - {rel_path}: {msg}")
         if len(errors) > 10:
             print(f"    ... and {len(errors) - 10} more")
+    return len(errors)
 
 
 # ─── Obsidian CLI integration (optional) ───
@@ -2070,8 +2143,14 @@ def main():
         print(json.dumps(report, indent=2, ensure_ascii=False))
 
     elif args.command == "reindex":
-        with VaultLock(vault):
-            reindex_vault(vault, full=not args.incremental)
+        try:
+            with VaultLock(vault):
+                failed = reindex_vault(vault, full=not args.incremental)
+        except IndexModelMismatch as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
+        if failed:
+            sys.exit(1)
 
     elif args.command == "obsidian-info":
         obs = ObsidianCLI(vault)

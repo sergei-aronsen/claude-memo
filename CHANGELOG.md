@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Embedding model fingerprint** — the index records which model and
+  embedding schema (`EMBEDDING_SCHEMA_VERSION`) built its vectors in
+  `index_meta.json`. If the engine's model changes, search and save refuse to
+  mix old and new vectors and ask for `reindex --full`; `memo_stats` shows the
+  status under `index`. Indexes from before this change are adopted as-is.
+  `reindex` now exits 1 when any file fails to index (2 on a model mismatch).
 - **Tier-aware decay (`memo_decay` / `decay` CLI)** — archive-only auto-forget.
   Episodic notes (debug logs) decay at `--days`; semantic/procedural knowledge
   only when never-recalled, orphaned, and far older. Dry-run by default;
