@@ -144,4 +144,5 @@ def summarize_redactions(labels: list[str]) -> str:
         counts[label] = counts.get(label, 0) + 1
     return ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
 
-_mypy_cache_probe: int = "not an int"  # temporary: proves the restored mypy cache still catches errors
+
+_mypy_cache_probe: int = "not an int"
