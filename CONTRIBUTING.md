@@ -40,6 +40,17 @@ python3 scripts/memo_engine.py warm-up
 python3 scripts/memo_engine.py search "test query" --vault /tmp/test-vault
 ```
 
+## CI
+
+`.github/workflows/ci.yml` installs the CPU-only torch build before `requirements.txt`.
+The default Linux wheel pulls about 3 GB of CUDA libraries, which made a CI run over three
+minutes; the tests stub `sentence_transformers` and never load torch. The pytest step itself
+takes about 2 seconds; most of a run is dependency install and mypy (about 20–30 s).
+
+The workflow file is part of the pip cache key. `setup-python` falls back to an older cache by
+prefix, so if a run restores a cache of several GB again, delete the stale cache entries
+(Actions → Caches) instead of letting them grow.
+
 ## Pull Requests
 
 1. Fork the repo and create a branch: `feature/your-feature` or `fix/your-fix`
