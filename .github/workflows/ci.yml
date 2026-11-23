@@ -62,7 +62,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install dev tools
-        run: pip install ruff mypy types-PyYAML bandit==1.9.4 pip-audit pytest pytest-cov
+        run: pip install ruff mypy types-PyYAML bandit==1.9.4 pytest pytest-cov
 
       - name: Lint (ruff)
         run: ruff check scripts/ tests/
@@ -86,9 +86,6 @@ jobs:
       - name: Security scan (bandit)
         run: bandit -r scripts/ -ll
 
-      - name: Dependency audit
-        run: pip-audit -r requirements.txt
-
       - name: Unit tests
         run: pytest tests/ --cov=scripts --cov-report=xml --cov-report=term
 
@@ -99,3 +96,28 @@ jobs:
           name: coverage-xml
           path: coverage.xml
           retention-days: 7
+
+  # pip-audit resolves requirements.txt in its own temporary venv and needs
+  # nothing from the main job, so it runs beside it instead of adding ~10 s.
+  audit:
+    name: "Dependency audit (Python ${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Dependency audit
+        run: pip-audit -r requirements.txt
