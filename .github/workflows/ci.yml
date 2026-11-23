@@ -1,10 +1,30 @@
 name: CI
 
 on:
+  # Docs-only changes (README, references/, docs/) skip CI: nothing it checks changes.
   push:
     branches: [main]
+    paths:
+      - "scripts/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "scripts/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yml"
+
+# A newer push to the same PR makes the running check obsolete; runs on main finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -27,7 +47,16 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          # The workflow is part of the key: how torch is installed changes what the cache holds.
+          cache-dependency-path: |
+            requirements.txt
+            .github/workflows/ci.yml
+
+      # CPU-only torch: the default Linux wheel pulls ~3 GB of CUDA libraries.
+      # Nothing in CI needs a GPU, tests stub sentence_transformers, and mypy
+      # sees the same torch sources in both builds.
+      - name: Install CPU-only torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install dependencies
         run: pip install -r requirements.txt
