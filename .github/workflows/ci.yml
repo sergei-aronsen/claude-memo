@@ -70,6 +70,16 @@ jobs:
       - name: Format check (ruff)
         run: ruff format --check scripts/ tests/
 
+      # mypy re-analyses torch/transformers on every run; its incremental cache
+      # checks each file's hash, so a cache restored by prefix stays correct.
+      - name: Cache mypy
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'pyproject.toml', 'scripts/**/*.py') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-py${{ matrix.python-version }}-
+
       - name: Type check (mypy)
         run: mypy scripts/
 
